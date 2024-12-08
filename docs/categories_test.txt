@@ -1,0 +1,12 @@
+variable, bins
+Nitrate, 0;0.5;1
+predatory zoop, 0;0.33;0.33;1
+Nitrit, 0;0.25;0.75;1
+H2S, 0;0.25;0.75;1
+Port, 0;0.33;0.75;1
+NH4, 0;0.25;0.7;1
+Oxygen, 0;0.25;0.75;1
+Turbidity, 0;0.25;0.75;1
+PTD, 0;0.2;0.75;1
+Cyanobacteria, 0;0.25;0.75;1
+Inflow, 0;0.25;0.75;1
