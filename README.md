@@ -209,28 +209,10 @@ If you use CEcBaN in your research, please cite:
 
 ```
 Tal, O., Ostrovsky, I., & Gal, G. (2024). A framework for identifying factors controlling cyanobacterium Microcystis flos‐aquae blooms by coupled CCM–ECCM Bayesian networks. Ecology and Evolution, 14(6), e11475.
+Hilau, S. and Tal, O. (2025). CEcBaN: A tool for causal analysis of ecological time-series.
 ```
 
-## License
-
-This project is licensed under the terms specified by the original authors. Please refer to the license file for details.
-
-## Contributing
-
-Contributions are welcome! Please:
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests if applicable
-5. Submit a pull request
 
 ## Contact
 
 For questions or support, please contact the Tal Lab at the Israel Oceanographic and Limnological Research Institute.
-
-## Acknowledgments
-
-- Tal Lab for methodology development
-- PyEDM developers for empirical dynamic modeling tools
-- bnlearn developers for Bayesian network capabilities
-- The scientific community for ecological domain knowledge
