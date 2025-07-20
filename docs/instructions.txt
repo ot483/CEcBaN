@@ -1,0 +1,108 @@
+CEcBaN: CCM ECCM Bayesian Network Analysis Tool
+================================================================================
+
+INTRODUCTION
+
+CEcBaN (CCM ECCM Bayesian Network) is a comprehensive analytical platform implementing the causal discovery methodology described in Tal et al. (2024). The tool enables researchers to identify causal relationships within complex multivariate time series data and construct predictive Bayesian network models for environmental and ecological systems.
+
+The platform was developed to address the challenge of identifying causal factors controlling complex ecological phenomena, such as cyanobacterial blooms, by combining state-space reconstruction methods with probabilistic modeling. CEcBaN integrates Convergent Cross Mapping (CCM) for causality detection, Extended Convergent Cross Mapping (ECCM) for time-delayed causality, and Bayesian Networks for predictive modeling and scenario analysis.
+
+THEORETICAL BACKGROUND
+
+Convergent Cross Mapping represents a paradigm shift from correlation-based approaches to causality detection in deterministic nonlinear systems. The method is grounded in Takens' embedding theorem, which demonstrates that variables in a coupled dynamical system contain information about each other's states. CCM tests whether historical records of one variable can successfully predict states of another variable by reconstructing the underlying system dynamics through time-delay embedding.
+
+The fundamental principle underlying CCM is that if variable X causally forces variable Y, then the historical values of Y should contain information about X, enabling cross-mapping. This approach differs from correlation analysis, as it can detect causality even when variables are not contemporaneously correlated but are coupled through the underlying system dynamics.
+
+Extended Convergent Cross Mapping addresses a critical limitation of standard CCM by incorporating temporal delays between cause and effect. Real ecological systems often exhibit significant time lags between forcing variables and responses. ECCM systematically tests different time delays and uses mutual information analysis to identify optimal lag periods, providing both causal direction and temporal characteristics of interactions.
+
+The integration with Bayesian Networks translates the identified causal structure into a probabilistic framework suitable for prediction and scenario analysis. This approach quantifies uncertainty in predictions while enabling researchers to test different management scenarios and identify the most influential factors controlling system behavior.
+
+DATA REQUIREMENTS AND PREPARATION
+
+CEcBaN requires time series data in CSV format with a temporal index and numerical variables. The data should be chronologically ordered with consistent time intervals between observations. A minimum of 35-40 observations is required for reliable CCM analysis.
+
+The temporal column should be named either "Date" or "date" and formatted in ISO standard (YYYY-MM-DD) or extended formats including time stamps. All other columns should contain numerical data representing the measured variables. Gaps are handled through interpolation which can affect analysis quality if excessive.
+
+Data quality impacts analysis reliability. The time series should exhibit sufficient signal-to-noise ratio for causality detection, and variables should be approximately stationary or rendered stationary through appropriate transformations. Extreme outliers are automatically detected and replaced using Z-score thresholds, but the underlying data quality remains crucial for meaningful results.
+
+ANALYSIS WORKFLOW
+
+The analysis proceeds through three main stages, each building upon the previous results. The first stage conducts CCM and ECCM analysis to identify potential causal relationships and their temporal characteristics. The second stage validates these relationships using surrogate datasets and provides an interactive interface for network refinement. The third stage constructs Bayesian Networks for prediction and scenario analysis. The last stage allows the exploration of the different scenarios and their probabilities.
+
+Stage 1: CCM-ECCM Analysis
+
+Data upload begins by selecting your CSV file and verifying the preview shows correct formatting. The system automatically detects column types and temporal structure. You must then specify the target variable, which represents the phenomenon you wish to understand and predict. This should be the primary outcome variable in your system, such as bloom intensity, species abundance, or water quality metrics.
+
+Confounders represent external forcing variables that influence the system but are not influenced by other measured variables. These typically include environmental drivers like temperature, precipitation, or nutrient inputs that affect multiple system components but have no upstream causality within your dataset. Proper identification of confounders is crucial for accurate causal inference.
+
+The subset length parameter determines the size of sliding windows used for time series segmentation. This should be long enough to capture relevant system dynamics while remaining computationally tractable. Values between 30-100 observations typically work well. The jump parameter controls the step size between consecutive windows, balancing computational efficiency with temporal resolution.
+
+Outlier detection uses Z-score thresholds to identify and replace extreme values that could distort the analysis. The default threshold of 3 standard deviations provides conservative outlier removal, but this can be adjusted based on your data characteristics and tolerance for extreme values.
+
+Resampling frequency allows temporal aggregation of high-frequency data to reduce computational load and focus on relevant time scales. The format follows pandas conventions (e.g., '1D' for daily, '1W' for weekly, '1M' for monthly). Choose a frequency that matches the relevant dynamics of your system while maintaining sufficient temporal resolution.
+
+Embedding parameters control the state space reconstruction process. The embedding dimension determines how many delayed coordinates are used to reconstruct the system's phase space. Higher dimensions can capture more complex dynamics but increase computational requirements and may introduce noise. The lag parameter specifies the time delay between embedding coordinates.
+
+Convergence detection can use either traditional mean-based approaches or more sophisticated density-based approach. The density method provides more robust convergence assessment.
+
+
+ECCM window size controls the temporal analysis resolution, while the maximum mutual information shift sets the longest time delay tested. This should reflect the expected response time of your system based on biological or physical understanding.
+
+Parallel processing can significantly reduce computation time for large datasets. Set the number of cores to match your system capabilities, typically using 70-80% of available cores for optimal performance without overwhelming the system.
+
+Stage 2: Network Refinement  
+
+The interactive network editing interface allows manual curation of detected relationships based on domain expertise and statistical significance. Each relationship can be classified as valid (confirmed causal relationship), under review (uncertain requiring attention), or invalid (false positive to exclude). This step is crucial for removing spurious relationships that may arise from statistical artifacts.
+
+Stage 3: Surrogate Validation
+
+Surrogate analysis provides statistical validation by comparing observed relationships to null distributions generated from randomized data. The surrogate datasets preserve the data properties of the original time series, creating a null hypothesis for significance testing. The number of surrogate datasets determines statistical power, while the significance quantile sets the threshold for accepting relationships as statistically meaningful.
+
+Stage 4: Bayesian Network Construction
+
+Categorization transforms continuous variables into discrete categories suitable for Bayesian Network construction. Automatic categorization uses optimal quantile selection based on Mann-Whitney U tests to identify boundaries that maximize statistical separation between groups. Alternatively, you can provide custom categorization boundaries based on domain-specific thresholds or regulatory standards.
+
+The Bayesian Network construction resolves bidirectional relationships by selecting either the relationship with higher CCM score or the one with shorter time delay, depending on your research priorities. The training fraction determines the data split for model validation.
+
+Model performance assessment includes accuracy and confusion matrices. The probability cutoff for binary classification can be optimized based on the relative costs of false positives and false negatives in your application.
+
+PARAMETER SELECTION GUIDELINES
+
+Parameter optimization should begin with default values and proceed iteratively based on data characteristics and initial results. Subset length should be increased for longer time series or systems with slow dynamics, while being reduced for shorter datasets or computational constraints. 
+
+
+Resampling frequency should match the relevant time scales of your system dynamics. For ecological applications, daily or weekly aggregation often provides good balance between computational efficiency and temporal resolution. 
+
+Outlier detection thresholds should be adjusted based on data quality and the prevalence of extreme events in your system. Environmental data often contains legitimate extreme values that should be preserved, while measurement errors should be removed. Examine the data distribution and adjust thresholds accordingly.
+
+RESULTS INTERPRETATION
+
+CCM analysis results show cross-mapping skill as a function of library length (amount of data used for cross mapping). Converged skill with library length indicates causality. Values approaching 1.0 indicate strong causality, while values near zero suggest no causal relationship.
+
+ECCM temporal analysis identifies optimal time delays and provides causal direction through asymmetric cross-mapping patterns. The temporal signature reveals characteristic response times that should align with biological or physical understanding of system dynamics.
+
+Network visualizations show nodes representing variables and directed edges indicating causal relationships. The network structure should be evaluated for biological plausibility and consistency with existing knowledge.
+
+Surrogate validation results display actual data points (red) against surrogate distributions (gray) with significance thresholds (black lines). Relationships above the threshold are considered statistically significant.
+
+Bayesian Network results include model performance metrics and scenario analysis. Validation plots show predicted versus observed values, while box plots display prediction distributions by observed categories. The confusion matrix provides detailed classification accuracy.
+
+Scenario analysis identifies variable states leading to maximum and minimum target probabilities, revealing key management points. Sensitivity analysis quantifies the relative importance of each variable for prediction accuracy.
+
+Before beginning analysis, verify data formatting, sufficient length, appropriate target variable selection, and correct confounder identification. During analysis, confirm CCM convergence, evaluate ECCM temporal patterns for reasonableness, ensure surrogate validation passes, and assess network structure for biological plausibility.
+
+
+
+REFERENCES
+
+Tal, O., Ostrovsky, I., & Gal, G. (2024). A framework for identifying factors controlling cyanobacterium Microcystis flos‐aquae blooms by coupled CCM–ECCM Bayesian networks. Ecology and Evolution, 14(6), e11475.
+
+Sugihara, G., et al. (2012). Detecting causality in complex ecosystems. Science, 338(6106), 496-500.
+
+Takens, F. (1981). Detecting strange attractors in turbulence. Lecture Notes in Mathematics, 898, 366-381.
+
+================================================================================
+
+This documentation provides comprehensive guidance for conducting rigorous causal analysis using CEcBaN. For additional support or to report issues, contact the Tal Lab at the Israel Oceanographic and Limnological Research.
+
+Contact: Tal Lab, Israel Oceanographic and Limnological Research
