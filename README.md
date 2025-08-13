@@ -26,7 +26,7 @@ The platform is based on the methodology described in Tal et al. (2024) and prov
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/your-username/cecban.git
+git clone https://github.com/ot483/cecban.git
 cd cecban
 ```
 
