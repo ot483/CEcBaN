@@ -23,7 +23,8 @@ def load_data(file_path):
     return pd.read_csv(file_path)
 
 def process_data(df, output_folder, target_column, confounders, subSetLength, jumpN, z_score_threshold, resample_freq, embedding_dim,
-                 lag, eccm_window_size, number_of_cores, file_path, ccm_training_proportion, max_mi_shift, check_convergence):
+                 lag, eccm_window_size, number_of_cores, file_path, ccm_training_proportion, max_mi_shift, check_convergence,
+                 conv_skill_threshold=0.1, conv_variance_threshold=0.1, conv_min_improvement=0.02):
     """Process the data based on given parameters."""
     print("Processing data...")
     def amplifyData(df, subSetLength=600, jumpN=30):
@@ -163,9 +164,9 @@ def process_data(df, output_folder, target_column, confounders, subSetLength, ju
             if "x1_mean" not in df_Scores.columns:
                 return False
             
-            SKILL_THRESHOLD = 0.1      
-            VARIANCE_THRESHOLD = 0.1   
-            MIN_IMPROVEMENT = 0.02     
+            SKILL_THRESHOLD = conv_skill_threshold
+            VARIANCE_THRESHOLD = conv_variance_threshold
+            MIN_IMPROVEMENT = conv_min_improvement
             RECENT_SLOPE_THRESHOLD = -0.1  
             TAIL_POINTS = int(len(df_Scores)*0.5)            
             
@@ -215,10 +216,125 @@ def process_data(df, output_folder, target_column, confounders, subSetLength, ju
         except Exception as e:
             print(f"Convergence check error: {e}")
             return False
-        
+
+
+    def calculate_convergence_confidence(df_Scores):
+        """
+         Quantitative convergence confidence scoring (0-1 scale)
+
+        Evaluates convergence quality based on four components (25% each):
+        1. Positive skill: Final prediction skill > 0
+        2. Increasing trend: Skill increases from early to late
+        3. Stability: Variance in late-stage skill is low (< 0.15)
+        4. Monotonic improvement: Skill increases across early, middle, late periods
+
+        Returns:
+            confidence_score (float): 0-1, where:
+                > 0.7 = high confidence convergence
+                0.4-0.7 = medium confidence (manual review recommended)
+                < 0.4 = low confidence non-convergence
+            components (dict): Breakdown of the four scoring components
+        """
+        try:
+            if df_Scores is None or len(df_Scores) < 10:
+                return 0.0, {'positive_skill': 0, 'increasing_trend': 0,
+                            'stability': 0, 'monotonic': 0}
+
+            if "x1_mean" not in df_Scores.columns:
+                return 0.0, {'positive_skill': 0, 'increasing_trend': 0,
+                            'stability': 0, 'monotonic': 0}
+
+            skill_data = df_Scores["x1_mean"].dropna()
+            if len(skill_data) < 10:
+                return 0.0, {'positive_skill': 0, 'increasing_trend': 0,
+                            'stability': 0, 'monotonic': 0}
+
+            # Divide into early, middle, late periods
+            n = len(skill_data)
+            early_end = n // 3
+            middle_end = 2 * n // 3
+
+            early_vals = skill_data[:early_end]
+            middle_vals = skill_data[early_end:middle_end]
+            late_vals = skill_data[middle_end:]
+
+            early_mean = early_vals.mean()
+            middle_mean = middle_vals.mean()
+            late_mean = late_vals.mean()
+            late_std = late_vals.std()
+
+            # Component 1: Positive skill (25%)
+            # Final skill should be > 0 (better than random)
+            if late_mean > 0.2:
+                positive_skill_score = 1.0
+            elif late_mean > 0:
+                positive_skill_score = late_mean / 0.2  # Linear scaling 0-0.2
+            else:
+                positive_skill_score = 0.0
+
+            # Component 2: Increasing trend (25%)
+            # Skill should increase from early to late
+            improvement = late_mean - early_mean
+            if improvement > 0.1:
+                increasing_trend_score = 1.0
+            elif improvement > 0:
+                increasing_trend_score = improvement / 0.1  # Linear scaling 0-0.1
+            else:
+                increasing_trend_score = 0.0
+
+            # Component 3: Stability (25%)
+            # Late-stage variance should be low (< 0.15)
+            if late_std < 0.05:
+                stability_score = 1.0
+            elif late_std < 0.15:
+                stability_score = 1.0 - (late_std - 0.05) / 0.1  # Linear scaling 0.05-0.15
+            else:
+                stability_score = 0.0
+
+            # Component 4: Monotonic improvement (25%)
+            # Skill should increase from early -> middle -> late
+            early_to_middle = middle_mean >= early_mean
+            middle_to_late = late_mean >= middle_mean
+
+            if early_to_middle and middle_to_late:
+                monotonic_score = 1.0
+            elif early_to_middle or middle_to_late:
+                monotonic_score = 0.5
+            else:
+                monotonic_score = 0.0
+
+            # Total confidence score (equal weighting: 25% each)
+            confidence_score = 0.25 * (positive_skill_score +
+                                      increasing_trend_score +
+                                      stability_score +
+                                      monotonic_score)
+
+            components = {
+                'positive_skill': positive_skill_score,
+                'increasing_trend': increasing_trend_score,
+                'stability': stability_score,
+                'monotonic': monotonic_score,
+                'early_mean': early_mean,
+                'middle_mean': middle_mean,
+                'late_mean': late_mean,
+                'late_std': late_std,
+                'improvement': improvement
+            }
+
+            return confidence_score, components
+
+        except Exception as e:
+            print(f"Confidence calculation error: {e}")
+            return 0.0, {'positive_skill': 0, 'increasing_trend': 0,
+                        'stability': 0, 'monotonic': 0}
+
+
+    # Track convergence confidence scores
+    convergence_confidence_data = []
+
     for counti, i in enumerate(All_CCM_dfs):
         All_CCM_dfs[counti] = list(All_CCM_dfs[counti])
-        
+
         if check_convergence == "density":
             try:
                 print(i[1])
@@ -226,19 +342,114 @@ def process_data(df, output_folder, target_column, confounders, subSetLength, ju
                 convergence = check_convergence_density_based(df_Scores)
             except:
                 convergence = False
+                df_Scores = None
         else:
             df_Scores = i[1]
             convergence = check_convergence_conventional(df_Scores)
-        
+
+        # Calculate convergence confidence score
+        if df_Scores is not None:
+            confidence_score, components = calculate_convergence_confidence(df_Scores)
+        else:
+            confidence_score = 0.0
+            components = {'positive_skill': 0, 'increasing_trend': 0,
+                         'stability': 0, 'monotonic': 0,
+                         'early_mean': 0, 'middle_mean': 0,
+                         'late_mean': 0, 'late_std': 0, 'improvement': 0}
+
+        # Store confidence data
+        try:
+            x1 = i[2][0][2] if len(i[2]) > 0 else 'unknown'
+            x2 = i[2][0][3] if len(i[2]) > 0 else 'unknown'
+        except:
+            x1 = 'unknown'
+            x2 = 'unknown'
+
+        convergence_confidence_data.append({
+            'x1': x1,
+            'x2': x2,
+            'convergence_binary': convergence,
+            'confidence_score': confidence_score,
+            'confidence_category': ('high' if confidence_score > 0.7
+                                   else 'medium' if confidence_score > 0.4
+                                   else 'low'),
+            'positive_skill': components['positive_skill'],
+            'increasing_trend': components['increasing_trend'],
+            'stability': components['stability'],
+            'monotonic': components['monotonic'],
+            'early_mean': components.get('early_mean', 0),
+            'middle_mean': components.get('middle_mean', 0),
+            'late_mean': components.get('late_mean', 0),
+            'late_std': components.get('late_std', 0),
+            'improvement': components.get('improvement', 0)
+        })
+
         All_CCM_dfs[counti].append(convergence)
         if convergence:
             print('true')
     
     with open(outputFolder + 'All_ccm1_results_updated.pickle', 'wb') as handle:
         pickle.dump(All_CCM_dfs, handle)
-    
-    
-    
+
+    # Save convergence confidence scores
+    print("\n" + "="*70)
+    print("CONVERGENCE CONFIDENCE SUMMARY")
+    print("="*70)
+
+    if len(convergence_confidence_data) > 0:
+        df_confidence = pd.DataFrame(convergence_confidence_data)
+
+        # Sort by confidence score (descending)
+        df_confidence = df_confidence.sort_values('confidence_score', ascending=False)
+
+        # Save to CSV
+        try:
+            csv_path = outputFolder + 'convergence_confidence_summary.csv'
+            df_confidence.to_csv(csv_path, index=False)
+            print(f"\n✓ Saved convergence confidence scores to: {csv_path}")
+        except Exception as e:
+            print(f"\n!  Warning: Could not save confidence CSV: {e}")
+
+        # Calculate statistics
+        n_total = len(df_confidence)
+        n_high = (df_confidence['confidence_category'] == 'high').sum()
+        n_medium = (df_confidence['confidence_category'] == 'medium').sum()
+        n_low = (df_confidence['confidence_category'] == 'low').sum()
+        n_converged_binary = df_confidence['convergence_binary'].sum()
+
+        print(f"\nTotal variable pairs analyzed: {n_total}")
+        print(f"Converged (binary check): {n_converged_binary}")
+        print(f"\nConfidence Distribution:")
+        print(f"  High confidence (>0.7):    {n_high:3d} ({n_high/n_total*100:5.1f}%)")
+        print(f"  Medium confidence (0.4-0.7): {n_medium:3d} ({n_medium/n_total*100:5.1f}%)")
+        print(f"  Low confidence (<0.4):     {n_low:3d} ({n_low/n_total*100:5.1f}%)")
+
+        # Show top 5 highest confidence pairs
+        if len(df_confidence) > 0:
+            print("\nTop 5 highest confidence convergence pairs:")
+            print("-" * 70)
+            top5 = df_confidence.head(5)
+            for idx, row in top5.iterrows():
+                cat_marker = "✓✓" if row['confidence_category'] == 'high' else "✓" if row['confidence_category'] == 'medium' else "○"
+                print(f"  {cat_marker} {row['x1']:20s} → {row['x2']:20s} | "
+                      f"score={row['confidence_score']:.3f}, late_skill={row['late_mean']:.3f}")
+
+        # Identify borderline cases (medium confidence) for manual review
+        medium_conf = df_confidence[df_confidence['confidence_category'] == 'medium']
+        if len(medium_conf) > 0:
+            print(f"\n!  {len(medium_conf)} pairs have medium confidence - consider manual review:")
+            print("-" * 70)
+            for idx, row in medium_conf.head(10).iterrows():
+                print(f"    {row['x1']:20s} → {row['x2']:20s} | score={row['confidence_score']:.3f}")
+            if len(medium_conf) > 10:
+                print(f"    ... and {len(medium_conf) - 10} more (see CSV for full list)")
+
+        print("="*70)
+    else:
+        print("\n!  Warning: No convergence confidence data to save")
+
+
+
     # =======
     plt.close()
     
@@ -313,19 +524,60 @@ def process_data(df, output_folder, target_column, confounders, subSetLength, ju
     
     x=0
 
+    # Track convergence confidence scores for CCM2/ECCM
+    convergence_confidence_data2 = []
+
     for counti, i in enumerate(All_CCM_dfs):
         All_CCM_dfs[counti] = list(All_CCM_dfs[counti])
-        
+
         if check_convergence == "density":
             try:
                 df_Scores = pd.concat([j[0] for j in i[2]])
                 convergence = check_convergence_density_based(df_Scores, i[2][0][2], i[2][0][3])
             except:
                 convergence = False
+                df_Scores = None
         else:
             df_Scores = i[1]
             convergence = check_convergence_conventional(df_Scores)
-        
+
+        #  Calculate convergence confidence score for CCM2/ECCM
+        if df_Scores is not None:
+            confidence_score, components = calculate_convergence_confidence(df_Scores)
+        else:
+            confidence_score = 0.0
+            components = {'positive_skill': 0, 'increasing_trend': 0,
+                         'stability': 0, 'monotonic': 0,
+                         'early_mean': 0, 'middle_mean': 0,
+                         'late_mean': 0, 'late_std': 0, 'improvement': 0}
+
+        # Store confidence data
+        try:
+            x1 = i[2][0][2] if len(i[2]) > 0 else 'unknown'
+            x2 = i[2][0][3] if len(i[2]) > 0 else 'unknown'
+        except:
+            x1 = 'unknown'
+            x2 = 'unknown'
+
+        convergence_confidence_data2.append({
+            'x1': x1,
+            'x2': x2,
+            'convergence_binary': convergence,
+            'confidence_score': confidence_score,
+            'confidence_category': ('high' if confidence_score > 0.7
+                                   else 'medium' if confidence_score > 0.4
+                                   else 'low'),
+            'positive_skill': components['positive_skill'],
+            'increasing_trend': components['increasing_trend'],
+            'stability': components['stability'],
+            'monotonic': components['monotonic'],
+            'early_mean': components.get('early_mean', 0),
+            'middle_mean': components.get('middle_mean', 0),
+            'late_mean': components.get('late_mean', 0),
+            'late_std': components.get('late_std', 0),
+            'improvement': components.get('improvement', 0)
+        })
+
         All_CCM_dfs[counti].append(convergence)
         if convergence:
             print('true')
@@ -356,10 +608,65 @@ def process_data(df, output_folder, target_column, confounders, subSetLength, ju
             df_CausalFeatures2 = df_CausalFeatures2.dropna(subset=["Score"])
         except:
             pass
+
+    if "Score" in df_CausalFeatures2.columns:
+        try:
+            df_CausalFeatures2["Score"] = pd.to_numeric(df_CausalFeatures2["Score"], errors="coerce")
+            df_CausalFeatures2 = df_CausalFeatures2.dropna(subset=["Score"])
+        except:
+            pass
     df_CausalFeatures2["Score"] = df_CausalFeatures2["Score"].round(3)
     
     df_CausalFeatures2.to_csv(outputFolder+'CCM2_results.csv')
-    
+
+    #  Save convergence confidence scores for CCM2/ECCM
+    print("\n" + "="*70)
+    print("ECCM CONVERGENCE CONFIDENCE SUMMARY")
+    print("="*70)
+
+    if len(convergence_confidence_data2) > 0:
+        df_confidence2 = pd.DataFrame(convergence_confidence_data2)
+
+        # Sort by confidence score (descending)
+        df_confidence2 = df_confidence2.sort_values('confidence_score', ascending=False)
+
+        # Save to CSV
+        try:
+            csv_path = outputFolder + 'eccm_convergence_confidence_summary.csv'
+            df_confidence2.to_csv(csv_path, index=False)
+            print(f"\n✓ Saved ECCM convergence confidence scores to: {csv_path}")
+        except Exception as e:
+            print(f"\n!  Warning: Could not save ECCM confidence CSV: {e}")
+
+        # Calculate statistics
+        n_total = len(df_confidence2)
+        n_high = (df_confidence2['confidence_category'] == 'high').sum()
+        n_medium = (df_confidence2['confidence_category'] == 'medium').sum()
+        n_low = (df_confidence2['confidence_category'] == 'low').sum()
+        n_converged_binary = df_confidence2['convergence_binary'].sum()
+
+        print(f"\nTotal ECCM pairs analyzed: {n_total}")
+        print(f"Converged (binary check): {n_converged_binary}")
+        print(f"\nConfidence Distribution:")
+        print(f"  High confidence (>0.7):    {n_high:3d} ({n_high/n_total*100:5.1f}%)")
+        print(f"  Medium confidence (0.4-0.7): {n_medium:3d} ({n_medium/n_total*100:5.1f}%)")
+        print(f"  Low confidence (<0.4):     {n_low:3d} ({n_low/n_total*100:5.1f}%)")
+
+        # Show top 5 highest confidence pairs
+        if len(df_confidence2) > 0:
+            print("\nTop 5 highest confidence ECCM convergence pairs:")
+            print("-" * 70)
+            top5 = df_confidence2.head(5)
+            for idx, row in top5.iterrows():
+                cat_marker = "✓✓" if row['confidence_category'] == 'high' else "✓" if row['confidence_category'] == 'medium' else "○"
+                print(f"  {cat_marker} {row['x1']:20s} → {row['x2']:20s} | "
+                      f"score={row['confidence_score']:.3f}, late_skill={row['late_mean']:.3f}")
+
+        print("="*70)
+    else:
+        print("\n!  Warning: No ECCM convergence confidence data to save")
+
+
     df_CausalFeatures2 =  df_CausalFeatures2[(~df_CausalFeatures2['x2'].isin(confounders))]
     df_CausalFeatures2 = df_CausalFeatures2.drop_duplicates()
     
@@ -425,7 +732,7 @@ def eccm_analysis(df, outputFolder, target_column, confounders, prefer_zero_lag=
     
     df = df[~df['x1'].isin([target_column])]
     df = df[~df['x2'].isin(confounders)]
-    
+    df = df.fillna(0)
     df.to_csv(outputFolder+"CCM_ECCM_curated.csv", index=False)
     
     
@@ -447,6 +754,9 @@ def main():
     parser.add_argument('--ccm_training_proportion', type=float, default=0.75, help='CCM training proportion in CCM calculation')
     parser.add_argument('--max_mi_shift', type=int, default=20, help='Max mutual information shift')
     parser.add_argument('--check_convergence', type=str, default='density', help='choose convergence indetification method')
+    parser.add_argument('--conv_skill_threshold', type=float, default=0.1, help='Minimum skill level required for convergence')
+    parser.add_argument('--conv_variance_threshold', type=float, default=0.1, help='Maximum variance allowed for convergence')
+    parser.add_argument('--conv_min_improvement', type=float, default=0.02, help='Minimum improvement from early to recent for convergence')
     parser.add_argument('--prefer_zero_lag', type=str, default='true', help='Prefer immediate effects (lag 0) when meaningful, or always use strongest effect')
 
 
@@ -458,7 +768,8 @@ def main():
 
     df = load_data(args.file_path)
     process_data(df, args.output_folder, args.target_column, args.confounders.split(','), args.subSetLength, args.jumpN, args.z_score_threshold, args.resample_freq,
-                 args.embedding_dim, args.lag, args.eccm_window_size, args.number_of_cores, args.file_path, args.ccm_training_proportion, args.max_mi_shift, args.check_convergence)
+                 args.embedding_dim, args.lag, args.eccm_window_size, args.number_of_cores, args.file_path, args.ccm_training_proportion, args.max_mi_shift, args.check_convergence,
+                 args.conv_skill_threshold, args.conv_variance_threshold, args.conv_min_improvement)
     
     print("processing data done.")
     print(" eccm analysis....")

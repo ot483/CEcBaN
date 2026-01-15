@@ -23,26 +23,44 @@ try:
 except ImportError:
     GOOGLE_AVAILABLE = False
 
+try:
+    import anthropic
+    ANTHROPIC_AVAILABLE = True
+except ImportError:
+    ANTHROPIC_AVAILABLE = False
+
 class LLMInteractionFinder:
-    def __init__(self, provider="openai", api_key=None, debug=True):
+    def __init__(self, provider="openai", api_key=None, model=None, debug=True):
         """
         Initialize LLM interaction finder
-        
+
         Args:
-            provider: "openai" or "google" 
+            provider: "openai", "google", or "anthropic"
             api_key: API key for the chosen provider
+            model: Specific model to use (optional, defaults to provider's default)
             debug: Enable debug logging
         """
         self.provider = provider.lower()
         self.api_key = api_key
+        self.model = model
         self.debug = debug
-        
+
+        # Set default models if not specified
+        if not self.model:
+            if self.provider == "openai":
+                self.model = "gpt-4o"
+            elif self.provider == "google":
+                self.model = "gemini-1.5-pro"
+            elif self.provider == "anthropic":
+                self.model = "claude-3-5-sonnet-20241022"
 
         if self.provider == "openai" and not OPENAI_AVAILABLE:
             raise ImportError("OpenAI library not installed. Run: pip install openai")
         elif self.provider == "google" and not GOOGLE_AVAILABLE:
             raise ImportError("Google AI library not installed. Run: pip install google-generativeai")
-        
+        elif self.provider == "anthropic" and not ANTHROPIC_AVAILABLE:
+            raise ImportError("Anthropic library not installed. Run: pip install anthropic")
+
 
         if self.provider == "openai":
             if api_key:
@@ -55,7 +73,7 @@ class LLMInteractionFinder:
                     openai.api_key = env_key
                 else:
                     raise ValueError("OpenAI API key required")
-                    
+
         elif self.provider == "google":
             if api_key:
                 genai.configure(api_key=api_key)
@@ -65,24 +83,36 @@ class LLMInteractionFinder:
                     genai.configure(api_key=env_key)
                 else:
                     raise ValueError("Google API key required")
+
+        elif self.provider == "anthropic":
+            if api_key:
+                self.api_key = api_key
+            else:
+                env_key = os.getenv("ANTHROPIC_API_KEY")
+                if env_key:
+                    self.api_key = env_key
+                else:
+                    raise ValueError("Anthropic API key required")
     
-    def create_enhanced_prompt(self, variables: List[str], target_variable: str = None, time_resolution: str = None) -> str:
+    def create_enhanced_prompt(self, variables: List[str], target_variable: str = None, time_resolution: str = None, data_description: str = None) -> str:
         """Create the enhanced prompt for comprehensive ecological interactions with multiple references"""
-        
+
         variables_str = ", ".join(variables)
-        
+
 
         context_info = ""
+        if data_description:
+            context_info += f"\nDATASET DESCRIPTION: {data_description}"
         if target_variable:
             context_info += f"\nTARGET VARIABLE for prediction: {target_variable}"
         if time_resolution:
             context_info += f"\nTIME RESOLUTION of the data: {time_resolution} (where D=days, W=weeks, M=months, Y=years, H=hours)"
-        
+
 
         focus_instruction = ""
         if target_variable:
             focus_instruction = f"\nWhile '{target_variable}' is the target variable for prediction, identify ALL ecologically meaningful interactions in the system - including connections between non-target variables that are part of the broader ecological network."
-        
+
         prompt = f"""You are an expert ecological and environmental scientist with deep knowledge of peer-reviewed scientific literature.
 
 I am analyzing ecological time series data with the following variables:
@@ -146,15 +176,17 @@ Return only the JSON array, no other text."""
     def query_llm(self, prompt: str) -> str:
         """Query the specified LLM provider"""
         if self.debug:
-            print(f"DEBUG: Using {self.provider.upper()}")
+            print(f"DEBUG: Using {self.provider.upper()} with model {self.model}")
             print(f"DEBUG: Prompt length: {len(prompt)} characters")
             print(f"DEBUG: Prompt preview: {prompt[:300]}...")
-        
+
         try:
             if self.provider == "openai":
                 return self._query_openai(prompt)
             elif self.provider == "google":
                 return self._query_google(prompt)
+            elif self.provider == "anthropic":
+                return self._query_anthropic(prompt)
             else:
                 raise ValueError(f"Unsupported provider: {self.provider}")
         except Exception as e:
@@ -165,23 +197,35 @@ Return only the JSON array, no other text."""
     def _query_openai(self, prompt: str) -> str:
         """Query OpenAI GPT model"""
         try:
+            # Models that use max_completion_tokens instead of max_tokens
+            new_param_models = ['gpt-5', 'gpt-5.2', 'o1-preview', 'o1-mini']
+            use_new_param = any(self.model.startswith(m) for m in new_param_models)
 
             try:
                 client = openai.OpenAI(api_key=self.api_key)
-                response = client.chat.completions.create(
-                    model="gpt-4",
-                    messages=[
+
+                # Build kwargs based on model
+                kwargs = {
+                    "model": self.model,
+                    "messages": [
                         {"role": "system", "content": "You are an expert ecological scientist with extensive knowledge of peer-reviewed scientific literature. Always follow the user's instructions precisely."},
                         {"role": "user", "content": prompt}
                     ],
-                    max_tokens=4000,
-                    temperature=0.1
-                )
+                    "temperature": 0.1
+                }
+
+                # Use appropriate token parameter
+                if use_new_param:
+                    kwargs["max_completion_tokens"] = 4000
+                else:
+                    kwargs["max_tokens"] = 4000
+
+                response = client.chat.completions.create(**kwargs)
                 return response.choices[0].message.content.strip()
             except AttributeError:
 
                 response = openai.ChatCompletion.create(
-                    model="gpt-4",
+                    model=self.model,
                     messages=[
                         {"role": "system", "content": "You are an expert ecological scientist with extensive knowledge of peer-reviewed scientific literature. Always follow the user's instructions precisely."},
                         {"role": "user", "content": prompt}
@@ -190,14 +234,14 @@ Return only the JSON array, no other text."""
                     temperature=0.1
                 )
                 return response.choices[0].message.content.strip()
-                
+
         except Exception as e:
             raise Exception(f"OpenAI API error: {str(e)}")
     
     def _query_google(self, prompt: str) -> str:
         """Query Google Gemini model"""
         try:
-            model = genai.GenerativeModel('gemini-pro')
+            model = genai.GenerativeModel(self.model)
             response = model.generate_content(
                 prompt,
                 generation_config=genai.types.GenerationConfig(
@@ -208,6 +252,23 @@ Return only the JSON array, no other text."""
             return response.text.strip()
         except Exception as e:
             raise Exception(f"Google API error: {str(e)}")
+
+    def _query_anthropic(self, prompt: str) -> str:
+        """Query Anthropic Claude model"""
+        try:
+            client = anthropic.Anthropic(api_key=self.api_key)
+            response = client.messages.create(
+                model=self.model,
+                max_tokens=4000,
+                temperature=0.1,
+                system="You are an expert ecological scientist with extensive knowledge of peer-reviewed scientific literature. Always follow the user's instructions precisely.",
+                messages=[
+                    {"role": "user", "content": prompt}
+                ]
+            )
+            return response.content[0].text.strip()
+        except Exception as e:
+            raise Exception(f"Anthropic API error: {str(e)}")
     
     def parse_response(self, response: str) -> List[Dict]:
         """Parse LLM response to extract interactions"""
@@ -292,15 +353,16 @@ Return only the JSON array, no other text."""
         
         return True
     
-    def find_interactions(self, variables: List[str], target_variable: str = None, time_resolution: str = None) -> Tuple[List[List], str]:
+    def find_interactions(self, variables: List[str], target_variable: str = None, time_resolution: str = None, data_description: str = None) -> Tuple[List[List], str]:
         """
         Main function to find ecological interactions using LLM with enhanced context
-        
+
         Args:
             variables: List of variable names
             target_variable: Target variable for prediction (optional)
             time_resolution: Time resolution of data (optional)
-            
+            data_description: User's description of the dataset (optional)
+
         Returns:
             Tuple of (interactions_list, status_message)
             interactions_list format: [[source, target, score, lag, justification_with_reference], ...]
@@ -309,9 +371,10 @@ Return only the JSON array, no other text."""
             print(f" Finding interactions for variables: {variables}")
             print(f" Target variable: {target_variable}")
             print(f" Time resolution: {time_resolution}")
-        
+            print(f" Data description: {data_description}")
 
-        prompt = self.create_enhanced_prompt(variables, target_variable, time_resolution)
+
+        prompt = self.create_enhanced_prompt(variables, target_variable, time_resolution, data_description)
         
         try:
 
@@ -363,26 +426,29 @@ Return only the JSON array, no other text."""
             return [], error_msg
 
 
-def get_llm_interactions(variables: List[str], provider: str = "openai", api_key: str = None, 
-                        target_variable: str = None, time_resolution: str = None, debug: bool = False) -> Tuple[List[List], str]:
+def get_llm_interactions(variables: List[str], provider: str = "openai", api_key: str = None,
+                        model: str = None, target_variable: str = None, time_resolution: str = None,
+                        data_description: str = None, debug: bool = False) -> Tuple[List[List], str]:
     """
     Enhanced convenience function to get LLM interactions with context
-    
+
     Args:
         variables: List of variable names
-        provider: "openai" or "google"
+        provider: "openai", "google", or "anthropic"
         api_key: API key (optional, will try environment variables)
+        model: Specific model to use (optional, defaults to provider's default)
         target_variable: Target variable for prediction (optional)
         time_resolution: Time resolution of data (optional)
+        data_description: User's description of the dataset (optional)
         debug: Enable debug logging (optional)
-    
+
     Returns:
         Tuple of (interactions_list, status_message)
         interactions_list format: [[source, target, score, lag, justification_with_reference], ...]
     """
     try:
-        finder = LLMInteractionFinder(provider=provider, api_key=api_key, debug=debug)
-        return finder.find_interactions(variables, target_variable, time_resolution)
+        finder = LLMInteractionFinder(provider=provider, api_key=api_key, model=model, debug=debug)
+        return finder.find_interactions(variables, target_variable, time_resolution, data_description)
     except Exception as e:
         if debug:
             print(f" Error initializing LLM: {str(e)}")
@@ -394,6 +460,7 @@ def test_llm_availability():
     results = {
         "openai_available": OPENAI_AVAILABLE,
         "google_available": GOOGLE_AVAILABLE,
+        "anthropic_available": ANTHROPIC_AVAILABLE,
         "can_import": True
     }
     return results
@@ -402,22 +469,24 @@ def test_llm_availability():
 if __name__ == "__main__":
 
     test_results = test_llm_availability()
-    print("Simplified Enhanced LLM Module Status:")
+    print("Enhanced LLM Module Status:")
     print(f"OpenAI available: {test_results['openai_available']}")
     print(f"Google available: {test_results['google_available']}")
+    print(f"Anthropic available: {test_results['anthropic_available']}")
     print(f"Module imports correctly: {test_results['can_import']}")
-    
-    if test_results['openai_available'] or test_results['google_available']:
+
+    if test_results['openai_available'] or test_results['google_available'] or test_results['anthropic_available']:
         print("\nModule is ready to use with enhanced features!")
         print("- Full academic references")
         print("- Context-aware prompting")
         print("- Target variable focus")
         print("- Time resolution awareness")
+        print("- Data description support")
         print("- System-wide interaction discovery")
         print("- Debug logging available")
     else:
         print("\nInstall required packages:")
-        print("pip install openai google-generativeai")
+        print("pip install openai google-generativeai anthropic")
     
 
     test_variables = ["Temperature", "Chlorophyll_A", "Nitrate", "Phosphate"]
@@ -425,16 +494,23 @@ if __name__ == "__main__":
     test_resolution = "2W"
     
 
-    if os.getenv("OPENAI_API_KEY") or os.getenv("GOOGLE_API_KEY"):
+    if os.getenv("OPENAI_API_KEY") or os.getenv("GOOGLE_API_KEY") or os.getenv("ANTHROPIC_API_KEY"):
         print(f"\nTesting enhanced functionality with debug enabled...")
         try:
-            provider = "openai" if os.getenv("OPENAI_API_KEY") else "google"
+            if os.getenv("OPENAI_API_KEY"):
+                provider = "openai"
+            elif os.getenv("GOOGLE_API_KEY"):
+                provider = "google"
+            else:
+                provider = "anthropic"
+
             interactions, status = get_llm_interactions(
-                test_variables, 
+                test_variables,
                 provider=provider,
                 target_variable=test_target,
                 time_resolution=test_resolution,
-                debug=True  
+                data_description="Test marine ecosystem data",
+                debug=True
             )
             print(f"Test result: {status}")
             if interactions:
@@ -442,4 +518,4 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"Test failed: {e}")
     else:
-        print("\nTo test functionality, set OPENAI_API_KEY or GOOGLE_API_KEY environment variable")
+        print("\nTo test functionality, set OPENAI_API_KEY, GOOGLE_API_KEY, or ANTHROPIC_API_KEY environment variable")

@@ -197,9 +197,9 @@ def present_all_density_ccm_with_controls(output_folder, current_table_data=None
                     dcc.Dropdown(
                         id={'type': 'ccm-validity', 'index': control_id},
                         options=[
-                            {'label': '❌', 'value': 0},
-                            {'label': '⚠️', 'value': 1},
-                            {'label': '✅', 'value': 2}
+                            {'label': 'X', 'value': 0},
+                            {'label': '!', 'value': 1},
+                            {'label': 'V', 'value': 2}
                         ],
                         value=current_validity,
                         className='compact-dropdown',
@@ -212,7 +212,7 @@ def present_all_density_ccm_with_controls(output_folder, current_table_data=None
     
     return html.Div(className='parameter-card', children=[
         html.H3([html.I(className='fas fa-chart-line', style={'marginRight': '10px'}), 'CCM Analysis Results'], className='card-title'),
-        html.P('Hover over images to see validation controls. ❌=Invalid, ⚠️=Under Review, ✅=Valid', 
+        html.P('Hover over images to see validation controls. X=Invalid, !=Under Review, V=Valid', 
                style={'color': '#6b7280', 'marginBottom': '20px', 'fontStyle': 'italic', 'fontSize': '0.9rem'}),
         html.Div(className='results-gallery', children=image_cards)
     ])
@@ -279,9 +279,9 @@ def present_all_eccm_with_controls(output_folder, current_table_data=None):
                     dcc.Dropdown(
                         id={'type': 'eccm-validity', 'index': control_id},
                         options=[
-                            {'label': '❌', 'value': 0},
-                            {'label': '⚠️', 'value': 1},
-                            {'label': '✅', 'value': 2}
+                            {'label': 'X', 'value': 0},
+                            {'label': '!', 'value': 1},
+                            {'label': 'V', 'value': 2}
                         ],
                         value=current_validity,
                         className='compact-dropdown',
@@ -294,7 +294,7 @@ def present_all_eccm_with_controls(output_folder, current_table_data=None):
     
     return html.Div(className='parameter-card', children=[
         html.H3([html.I(className='fas fa-project-diagram', style={'marginRight': '10px'}), 'ECCM Analysis Results'], className='card-title'),
-        html.P('Hover over images to see validation controls. ❌=Invalid, ⚠️=Under Review, ✅=Valid', 
+        html.P('Hover over images to see validation controls. X=Invalid, !=Under Review, V=Valid', 
                style={'color': '#6b7280', 'marginBottom': '20px', 'fontStyle': 'italic', 'fontSize': '0.9rem'}),
         html.Div(className='results-gallery', children=image_cards)
     ])
@@ -342,10 +342,13 @@ def present_all_eccm(output_folder):
         ])
     ])
 
-app = dash.Dash(__name__, external_stylesheets=[
-    'https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap',
-    'https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css'
-])
+app = dash.Dash(__name__,
+    external_stylesheets=[
+        'https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap',
+        'https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css'
+    ],
+    suppress_callback_exceptions=True
+)
 app._favicon = ("logo/logo.png")
 app.title = 'CEcBaN'
 clear_assets_folder()
@@ -353,7 +356,46 @@ clear_assets_folder()
 # Initialize debug log
 with open('debug_log.txt', 'w') as f:
     f.write("=== CEcBaN Debug Log ===\n")
-    f.write(f"Started at: {datetime.datetime.now()}\n\n")  
+    f.write(f"Started at: {datetime.datetime.now()}\n\n")
+
+# Function to get available results folders at startup
+def get_results_folders():
+    """Get list of available results folders for dropdown."""
+    try:
+        results_dir = os.path.join(os.getcwd(), "Results")
+        if not os.path.exists(results_dir):
+            return []
+
+        folders = [f for f in os.listdir(results_dir)
+                   if os.path.isdir(os.path.join(results_dir, f))]
+
+        if not folders:
+            return []
+
+        # Sort by modification time (most recent first)
+        folders_with_time = []
+        for folder in folders:
+            folder_path = os.path.join(results_dir, folder)
+            mtime = os.path.getmtime(folder_path)
+            folders_with_time.append((folder, mtime))
+
+        folders_with_time.sort(key=lambda x: x[1], reverse=True)
+
+        # Create options
+        options = []
+        for folder, mtime in folders_with_time:
+            timestamp = datetime.datetime.fromtimestamp(mtime).strftime('%Y-%m-%d %H:%M:%S')
+            label = f"{folder} (Modified: {timestamp})"
+            options.append({'label': label, 'value': folder})
+
+        print(f"[STARTUP] Found {len(options)} results folders")
+        return options
+    except Exception as e:
+        print(f"[STARTUP ERROR] Failed to load results folders: {e}")
+        return []
+
+# Get results folders at startup
+RESULTS_FOLDERS = get_results_folders()  
 
 app.index_string = '''
 <!DOCTYPE html>
@@ -740,6 +782,52 @@ def write_parameters_to_file(output_folder, step_name, params):
             file.write(f"{param}: {value}\n")
         file.write("\n")
 
+def read_parameters_from_file(output_folder):
+    """Read the most recent parameters from parameters.txt"""
+    params_file = os.path.join(output_folder, 'parameters.txt')
+    if not os.path.exists(params_file):
+        return {}
+
+    params = {}
+    current_step = None
+
+    with open(params_file, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith('Step:'):
+                current_step = line.split('Step:')[1].strip()
+            elif ':' in line and current_step:
+                key, value = line.split(':', 1)
+                key = key.strip()
+                value = value.strip()
+
+                # Convert string representations to proper types
+                if value == 'None':
+                    value = None
+                elif value == 'true' or value == 'True':
+                    value = True
+                elif value == 'false' or value == 'False':
+                    value = False
+                elif value.startswith('[') and value.endswith(']'):
+                    # Parse list (e.g., "['Inflow', 'Temperature']")
+                    try:
+                        value = eval(value)
+                    except:
+                        pass
+                else:
+                    # Try to convert to number
+                    try:
+                        if '.' in value:
+                            value = float(value)
+                        else:
+                            value = int(value)
+                    except ValueError:
+                        pass  # Keep as string
+
+                params[key] = value
+
+    return params
+
 instructions_text = html.Div([
     html.P("CEcBaN is a causal analysis platform implementing CCM-ECCM methodology for identifying causal relationships in time series data.", 
            style={'marginBottom': '10px'}),
@@ -836,6 +924,7 @@ app.layout = html.Div([
     ]),
 
     dcc.Store(id='stored-output-folder', storage_type='session'),
+    dcc.Store(id='loaded-from-previous', storage_type='session'),  # Marker for loaded results
     dcc.Store(id='image-control-updates', storage_type='memory'),  # Track manual updates
     
     html.Div(className='main-container', children=[  
@@ -908,9 +997,41 @@ app.layout = html.Div([
                     dcc.Download(id='download-instructions')
                 ])
             ]),
-            
+
             html.Div(className='parameter-card', children=[
-                html.H3([html.I(className='fas fa-upload', style={'marginRight': '10px'}), 'Data Upload'], className='card-title'),
+                html.H3([html.I(className='fas fa-folder-open', style={'marginRight': '10px'}), 'Load Previous Results'], className='card-title'),
+                html.P('Load a previously completed analysis to view results or continue working.',
+                       style={'fontSize': '0.95rem', 'color': '#6b7280', 'marginBottom': '20px'}),
+
+                html.Div([
+                    html.Label('Select Results Folder:', style={'fontWeight': '600', 'marginBottom': '8px', 'display': 'block'}),
+                    dcc.Dropdown(
+                        id='previous-results-dropdown',
+                        options=RESULTS_FOLDERS,
+                        placeholder='Select a previous analysis...',
+                        style={'marginBottom': '15px'}
+                    ),
+                ]),
+
+                html.Button(
+                    'Load Results',
+                    id='load-previous-results-button',
+                    className='action-button',
+                    n_clicks=0,
+                    style={'marginTop': '10px'}
+                ),
+
+                html.Div(id='load-results-status', style={'marginTop': '15px'}),
+            ]),
+
+            html.Div(style={'textAlign': 'center', 'margin': '30px 0', 'fontSize': '1.2rem', 'color': '#9ca3af', 'fontWeight': '600'}, children=[
+                '─── OR ───'
+            ]),
+
+            html.Div(className='parameter-card', children=[
+                html.H3([html.I(className='fas fa-upload', style={'marginRight': '10px'}), 'Upload New Data'], className='card-title'),
+                html.P('Start a new analysis by uploading your dataset.',
+                       style={'fontSize': '0.95rem', 'color': '#6b7280', 'marginBottom': '20px'}),
                 dcc.Upload(
                     id='upload-data',
                     children=html.Div([
@@ -925,9 +1046,9 @@ app.layout = html.Div([
                 html.Div(id='output-data-upload', style={'marginTop': '20px'})
             ]),
             
-            dcc.Store(id='stored-filename'),  
-            dcc.Store(id='stored-columns'), 
-            dcc.Store(id='categorization-filepath'),  
+            dcc.Store(id='stored-filename'),
+            dcc.Store(id='stored-columns'),
+            dcc.Store(id='categorization-filepath'),
             dcc.Store(id='first-step-completed', data=False),
             dcc.Store(id='inference-model-data'),
             dcc.Store(id='known-interactions', data=[]),
@@ -1008,19 +1129,6 @@ app.layout = html.Div([
                 
                 html.Div([
                     html.Div([
-                        html.Label([html.I(className='fas fa-circle', style={'marginRight': '8px'}), 'Convergence Method'], style={'fontWeight': '600', 'marginBottom': '8px', 'display': 'block'}),
-                        dcc.Dropdown(
-                            id='check-convergence',
-                            options=[
-                                {'label': 'Results Mean', 'value': 'means'},
-                                {'label': 'Results Density', 'value': 'density'}
-                            ],
-                            value='density',
-                            className='input-field'
-                        )
-                    ], style={'width': '48%', 'marginTop': '20px', 'marginRight': '4%', 'display': 'inline-block'}),
-                    
-                    html.Div([
                         html.Label([html.I(className='fas fa-circle', style={'marginRight': '8px'}), 'ECCM Lag Strategy'], style={'fontWeight': '600', 'marginBottom': '8px', 'display': 'block'}),
                         dcc.Dropdown(
                             id='prefer-zero-lag',
@@ -1032,6 +1140,35 @@ app.layout = html.Div([
                             className='input-field'
                         )
                     ], style={'width': '48%', 'marginTop': '20px', 'display': 'inline-block'})
+                ]),
+
+                html.Div(style={'marginTop': '25px', 'padding': '15px', 'backgroundColor': '#f8fafc', 'borderRadius': '8px', 'border': '1px solid #e2e8f0'}, children=[
+                    html.H4([html.I(className='fas fa-chart-line', style={'marginRight': '10px'}), 'Convergence Identification Parameters'],
+                            style={'marginBottom': '10px', 'color': '#334155'}),
+                    html.P("Convergence is identified when the CCM skill shows improvement from early to late library sizes, "
+                           "maintains sufficient skill level, and has stable variance. A causal relationship is detected when "
+                           "the prediction skill converges (stabilizes and improves) as more data points are used.",
+                           style={'marginBottom': '15px', 'color': '#64748b', 'fontSize': '13px'}),
+
+                    html.Div([
+                        html.Div([
+                            html.Label([html.I(className='fas fa-circle', style={'marginRight': '8px'}), 'Skill Threshold'], style={'fontWeight': '600', 'marginBottom': '8px', 'display': 'block'}),
+                            dcc.Input(id='conv-skill-threshold', type='number', value=0.1, min=0.0, max=1.0, step=0.01, className='input-field'),
+                            html.Small("Minimum skill level required in recent values", style={'color': '#94a3b8', 'fontSize': '11px'})
+                        ], style={'width': '30%', 'display': 'inline-block', 'marginRight': '3%'}),
+
+                        html.Div([
+                            html.Label([html.I(className='fas fa-circle', style={'marginRight': '8px'}), 'Variance Threshold'], style={'fontWeight': '600', 'marginBottom': '8px', 'display': 'block'}),
+                            dcc.Input(id='conv-variance-threshold', type='number', value=0.1, min=0.0, max=1.0, step=0.01, className='input-field'),
+                            html.Small("Maximum variance allowed in recent values", style={'color': '#94a3b8', 'fontSize': '11px'})
+                        ], style={'width': '30%', 'display': 'inline-block', 'marginRight': '3%'}),
+
+                        html.Div([
+                            html.Label([html.I(className='fas fa-circle', style={'marginRight': '8px'}), 'Min Improvement'], style={'fontWeight': '600', 'marginBottom': '8px', 'display': 'block'}),
+                            dcc.Input(id='conv-min-improvement', type='number', value=0.02, min=0.0, max=1.0, step=0.01, className='input-field'),
+                            html.Small("Minimum improvement from early to recent", style={'color': '#94a3b8', 'fontSize': '11px'})
+                        ], style={'width': '30%', 'display': 'inline-block'})
+                    ])
                 ])
             ]),
             
@@ -1041,24 +1178,34 @@ app.layout = html.Div([
                        style={'marginBottom': '20px', 'color': '#6b7280'}),
                 
                 html.Div(className='parameter-card', style={'backgroundColor': '#f0f9ff', 'border': '1px solid #0ea5e9', 'marginBottom': '25px'}, children=[
-                    html.H4([html.I(className='fas fa-robot', style={'marginRight': '10px'}), 'AI Literature Discovery'], 
+                    html.H4([html.I(className='fas fa-robot', style={'marginRight': '10px'}), 'AI Literature Discovery'],
                             style={'color': '#0ea5e9', 'marginBottom': '15px'}),
-                    
+
                     html.Div([
                         html.Div([
                             html.Label('LLM Provider:', style={'fontWeight': '600', 'marginBottom': '8px', 'display': 'block'}),
                             dcc.Dropdown(
                                 id='llm-provider',
                                 options=[
-                                    {'label': 'OpenAI GPT-4', 'value': 'openai'},
-                                    {'label': 'Google Gemini', 'value': 'google'}
+                                    {'label': 'OpenAI', 'value': 'openai'},
+                                    {'label': 'Google', 'value': 'google'},
+                                    {'label': 'Anthropic', 'value': 'anthropic'}
                                 ],
                                 value='openai',
                                 className='input-field',
                                 style={'minHeight': '50px', 'height': '50px'}
                             )
-                        ], style={'width': '48%', 'display': 'inline-block', 'marginRight': '4%', 'verticalAlign': 'top'}),
-                        
+                        ], style={'width': '31%', 'display': 'inline-block', 'marginRight': '3.5%', 'verticalAlign': 'top'}),
+
+                        html.Div([
+                            html.Label('Model:', style={'fontWeight': '600', 'marginBottom': '8px', 'display': 'block'}),
+                            dcc.Dropdown(
+                                id='llm-model',
+                                className='input-field',
+                                style={'minHeight': '50px', 'height': '50px'}
+                            )
+                        ], style={'width': '31%', 'display': 'inline-block', 'marginRight': '3.5%', 'verticalAlign': 'top'}),
+
                         html.Div([
                             html.Label('API Key:', style={'fontWeight': '600', 'marginBottom': '8px', 'display': 'block'}),
                             dcc.Input(
@@ -1068,16 +1215,26 @@ app.layout = html.Div([
                                 className='input-field',
                                 style={'height': '50px'}
                             )
-                        ], style={'width': '48%', 'display': 'inline-block', 'verticalAlign': 'top'})
+                        ], style={'width': '31%', 'display': 'inline-block', 'verticalAlign': 'top'})
                     ], style={'marginBottom': '20px'}),
-                    
+
+                    html.Div([
+                        html.Label('Dataset Description (optional but recommended):', style={'fontWeight': '600', 'marginBottom': '8px', 'display': 'block'}),
+                        dcc.Textarea(
+                            id='llm-data-description',
+                            placeholder='Describe your data to help the AI provide more relevant interactions (e.g., "This is marine ecosystem data from the Mediterranean Sea, 2010-2020, focusing on temperature, salinity, and phytoplankton abundance")',
+                            className='input-field',
+                            style={'width': '100%', 'height': '80px', 'resize': 'vertical', 'fontFamily': 'inherit', 'fontSize': '0.95rem'}
+                        )
+                    ], style={'marginBottom': '20px'}),
+
                     html.Div([
                         html.Button([
                             html.I(className='fas fa-brain', style={'marginRight': '10px'}),
                             'Ask AI for Literature-Based Interactions'
-                        ], id='ask-llm-button', n_clicks=0, className='modern-button', 
+                        ], id='ask-llm-button', n_clicks=0, className='modern-button',
                         style={'marginRight': '15px'}),
-                        
+
                         dcc.Loading(
                             id="loading-llm",
                             type="graph",
@@ -1085,7 +1242,7 @@ app.layout = html.Div([
                             children=html.Div(id="llm-status", style={'display': 'inline-block', 'marginLeft': '15px'})
                         )
                     ], style={'textAlign': 'center'}),
-                    
+
                     html.Div(id='llm-results-display', style={'marginTop': '20px'})
                 ]),
                 
@@ -1275,10 +1432,35 @@ app.layout = html.Div([
                         html.Div('4', className='step-number'),
                         html.H2('Bayesian Network Modeling', className='step-title')
                     ]),
-                    
+
+                    html.Div(className='parameter-card', children=[
+                        html.H4([html.I(className='fas fa-filter', style={'marginRight': '10px'}), 'Significance Filtration'], className='card-title'),
+                        html.P('Select which significance criteria to use for filtering edges before BN modeling:',
+                               style={'color': '#6b7280', 'marginBottom': '20px', 'fontSize': '0.95rem'}),
+
+                        html.Div([
+                            dcc.RadioItems(
+                                id='significance-filter-mode',
+                                options=[
+                                    {'label': ' Use FDR only (False Discovery Rate corrected p-values)', 'value': 'fdr_only'},
+                                    {'label': ' Use surrogate quantile only (Score above surrogate null distribution threshold)', 'value': 'surrogate_only'},
+                                    {'label': ' Consider both (edges must pass both FDR and surrogate tests)', 'value': 'both'}
+                                ],
+                                value='both',
+                                labelStyle={'display': 'block', 'marginBottom': '12px', 'fontWeight': '500', 'color': '#374151'}
+                            ),
+                        ], style={'marginBottom': '10px'}),
+
+                        html.Div([
+                            html.I(className='fas fa-info-circle', style={'color': '#3b82f6', 'marginRight': '8px'}),
+                            html.Span('FDR: edges with significant_fdr=True | Surrogate: edges whose Score exceeds the surrogate quantile threshold (e.g., above 95th percentile of null distribution)',
+                                     style={'color': '#6b7280', 'fontSize': '0.85rem', 'fontStyle': 'italic'})
+                        ])
+                    ]),
+
                     html.Div(className='parameter-card', children=[
                         html.H4([html.I(className='fas fa-network-wired', style={'marginRight': '10px'}), 'Model Configuration'], className='card-title'),
-                        
+
                         html.Div([
                             html.Label([html.I(className='fas fa-tags', style={'marginRight': '8px'}), 'Categorization Method'], style={'fontWeight': '600', 'marginBottom': '15px', 'display': 'block'}),
                             dcc.RadioItems(
@@ -1460,16 +1642,18 @@ def track_image_control_changes(ccm_values, eccm_values, ccm_ids, eccm_ids, curr
     for value, id_dict in zip(eccm_values, eccm_ids):
         # FIXED: Use double quotes to match actual trigger format
         control_prop_id = f'{{"index":"{id_dict["index"]}","type":"eccm-validity"}}.value'
-        
+
         if control_prop_id in triggered_prop_ids and value is not None:
             control_id = id_dict['index']
+            print(f"🔍 ECCM TRIGGERED: Control ID={control_id}, Value={value}")
             with open('debug_log.txt', 'a') as f:
                 f.write(f"TRIGGERED ECCM Control ID: {control_id}, Value: {value} (type: {type(value)})\n")
                 f.write(f"Matched prop ID: {control_prop_id}\n")
-                
+
             # Extract variable names from control ID - IMPROVED VERSION
             if control_id.startswith('eccm_'):
                 var_part = control_id[5:]  # Remove 'eccm_' prefix
+                print(f"🔍 ECCM var_part after removing prefix: '{var_part}'")
                 if '_' in var_part:
                     # Try to split into exactly 2 parts
                     underscore_pos = var_part.find('_')
@@ -1477,18 +1661,26 @@ def track_image_control_changes(ccm_values, eccm_values, ccm_ids, eccm_ids, curr
                         x1 = var_part[:underscore_pos]
                         x2 = var_part[underscore_pos+1:]
                         key = f"{x1}_{x2}"
-                        
+                        print(f"🔍 ECCM extracted: x1='{x1}', x2='{x2}', key='{key}'")
+
                         # Add unique timestamp to ensure this is a fresh update
                         import time
                         updates[key] = {
-                            'value': value, 
-                            'source': 'image', 
+                            'value': value,
+                            'source': 'image',
                             'timestamp': datetime.datetime.now().isoformat(),
                             'trigger_id': control_prop_id,
                             'unique_id': time.time()  # Force uniqueness
                         }
+                        print(f"V ECCM Update stored: {key} = {value}")
                         with open('debug_log.txt', 'a') as f:
                             f.write(f"TRIGGERED ECCM Update stored: {key} = {value}\n")
+                    else:
+                        print(f"X ECCM: underscore_pos == -1 (this should never happen)")
+                else:
+                    print(f"X ECCM: No underscore found in var_part='{var_part}'")
+            else:
+                print(f"X ECCM: control_id doesn't start with 'eccm_': '{control_id}'")
     
     with open('debug_log.txt', 'a') as f:
         f.write(f"Final updates: {updates}\n")
@@ -1521,7 +1713,39 @@ def track_image_control_changes(ccm_values, eccm_values, ccm_ids, eccm_ids, curr
                 df.to_csv(csv_file, index=False)
                 with open('debug_log.txt', 'a') as f:
                     f.write(f"CSV SAVED with image control changes\n")
-                    
+
+                # Also update Surr_filtered.csv if it exists (so manual edits are respected by BN)
+                surr_filtered_file = os.path.join(output_folder, 'Surr_filtered.csv')
+                if os.path.exists(surr_filtered_file):
+                    try:
+                        df_surr = pd.read_csv(surr_filtered_file)
+                        # Apply same updates to Surr_filtered.csv
+                        for var_pair, update_info in updates.items():
+                            if update_info.get('source') == 'image' and update_info.get('unique_id'):
+                                parts = var_pair.split('_')
+                                if len(parts) >= 2:
+                                    x1, x2 = parts[0], '_'.join(parts[1:])
+                                    value = update_info['value']
+                                    for i, row in df_surr.iterrows():
+                                        if str(row.get('x1', '')).strip() == str(x1).strip() and str(row.get('x2', '')).strip() == str(x2).strip():
+                                            df_surr.at[i, 'is_Valid'] = value
+                                            break
+                        # Remove invalidated interactions
+                        df_surr = df_surr[df_surr['is_Valid'] == 2]
+                        df_surr.to_csv(surr_filtered_file, index=False)
+                        with open('debug_log.txt', 'a') as f:
+                            f.write(f"Surr_filtered.csv UPDATED with image control changes\n")
+                    except Exception as e:
+                        with open('debug_log.txt', 'a') as f:
+                            f.write(f"Warning: Could not update Surr_filtered.csv: {e}\n")
+
+                # Create MANUAL_EDITS_MADE flag
+                manual_edits_flag = os.path.join(output_folder, 'MANUAL_EDITS_MADE.flag')
+                with open(manual_edits_flag, 'w') as f:
+                    f.write(f'User made manual edits via image controls at {datetime.datetime.now()}\n')
+                with open('debug_log.txt', 'a') as f:
+                    f.write(f"MANUAL_EDITS_MADE.flag created\n")
+
         except Exception as e:
             with open('debug_log.txt', 'a') as f:
                 f.write(f"CSV UPDATE ERROR: {str(e)}\n")
@@ -1534,19 +1758,54 @@ def track_image_control_changes(ccm_values, eccm_values, ccm_ids, eccm_ids, curr
 @app.callback(
     Output('table-sync-status', 'data'),
     [Input('table-editing', 'data')],
-    [State('stored-output-folder', 'data')],
+    [State('stored-output-folder', 'data'),
+     State('image-control-updates', 'data')],
     prevent_initial_call=True
 )
-def sync_table_to_csv(table_data, output_folder):
+def sync_table_to_csv(table_data, output_folder, image_updates):
     if not table_data or not output_folder:
         raise PreventUpdate
-    
+
+    # Prevent circular update: Don't sync if table was just updated from image controls
+    if image_updates and any(update.get('unique_id') for update in image_updates.values()):
+        with open('debug_log.txt', 'a') as f:
+            f.write(f"SYNC SKIPPED: Table was just updated from image controls\n")
+        raise PreventUpdate
+
     try:
         curated_file = os.path.join(output_folder, 'CCM_ECCM_curated.csv')
         df_updated = pd.DataFrame(table_data)
         df_updated.to_csv(curated_file, index=False)
-        
-            
+
+        # Also update Surr_filtered.csv if it exists (so manual edits are respected by BN)
+        surr_filtered_file = os.path.join(output_folder, 'Surr_filtered.csv')
+        if os.path.exists(surr_filtered_file):
+            try:
+                df_surr = pd.read_csv(surr_filtered_file)
+                # Update is_Valid values from the edited table
+                for _, row in df_updated.iterrows():
+                    x1, x2 = row.get('x1'), row.get('x2')
+                    is_valid = row.get('is_Valid', 2)
+                    mask = (df_surr['x1'] == x1) & (df_surr['x2'] == x2)
+                    if mask.any():
+                        df_surr.loc[mask, 'is_Valid'] = is_valid
+                # Remove invalidated interactions
+                df_surr = df_surr[df_surr['is_Valid'] == 2]
+                df_surr.to_csv(surr_filtered_file, index=False)
+                with open('debug_log.txt', 'a') as f:
+                    f.write(f"Surr_filtered.csv UPDATED with table edits\n")
+            except Exception as e:
+                with open('debug_log.txt', 'a') as f:
+                    f.write(f"Warning: Could not update Surr_filtered.csv: {e}\n")
+
+        # Create MANUAL_EDITS_MADE flag
+        manual_edits_flag = os.path.join(output_folder, 'MANUAL_EDITS_MADE.flag')
+        with open(manual_edits_flag, 'w') as f:
+            f.write(f'User made manual edits via table at {datetime.datetime.now()}\n')
+
+        with open('debug_log.txt', 'a') as f:
+            f.write(f"TABLE AUTO-SAVED to CSV + MANUAL_EDITS_MADE.flag created\n")
+
         return {'synced': True}
     except:
         return {'synced': False}
@@ -1565,34 +1824,37 @@ def clear_image_store_on_table_edit(sync_status):
         return {}  # Clear the store
     raise PreventUpdate
 
-# Refresh table from CSV when image controls change
+# Refresh table from CSV when image controls change AND clear the image store
 @app.callback(
-    Output('table-editing', 'data', allow_duplicate=True),
+    [Output('table-editing', 'data', allow_duplicate=True),
+     Output('image-control-updates', 'data', allow_duplicate=True)],
     [Input('image-control-updates', 'data')],
     [State('stored-output-folder', 'data')],
     prevent_initial_call=True
 )
 def refresh_table_from_csv(image_updates, output_folder):
-    """Refresh table data from CSV when image controls change"""
+    """Refresh table data from CSV when image controls change, then clear the image store"""
     if not image_updates or not output_folder:
         raise PreventUpdate
-    
+
     # Only refresh if there are actual changes with unique_id (real user changes)
     has_real_changes = any(update.get('unique_id') for update in image_updates.values())
     if not has_real_changes:
         raise PreventUpdate
-    
+
     try:
         csv_file = os.path.join(output_folder, 'CCM_ECCM_curated.csv')
         if os.path.exists(csv_file):
             df = pd.read_csv(csv_file)
             with open('debug_log.txt', 'a') as f:
                 f.write(f"TABLE REFRESHED from CSV due to image control changes\n")
-            return df.to_dict('records')
+                f.write(f"CLEARING image-control-updates to prevent blocking future table edits\n")
+            # Return updated table data AND clear the image store
+            return df.to_dict('records'), {}
     except Exception as e:
         with open('debug_log.txt', 'a') as f:
             f.write(f"TABLE REFRESH ERROR: {str(e)}\n")
-    
+
     raise PreventUpdate
 
 @app.callback(
@@ -1620,17 +1882,56 @@ def hide_loading_after_stage3(loading_output):
     return {'display': 'none'}
 
 @app.callback(
+    [Output('llm-model', 'options'),
+     Output('llm-model', 'value')],
+    [Input('llm-provider', 'value')]
+)
+def update_model_dropdown(provider):
+    """Update model dropdown based on selected provider"""
+    if provider == 'openai':
+        options = [
+            {'label': 'GPT-5', 'value': 'gpt-5'},
+            {'label': 'GPT-5.2', 'value': 'gpt-5.2'},
+            {'label': 'GPT-4o', 'value': 'gpt-4o'},
+            {'label': 'GPT-4o Mini', 'value': 'gpt-4o-mini'},
+            {'label': 'O1 Preview', 'value': 'o1-preview'},
+            {'label': 'O1 Mini', 'value': 'o1-mini'}
+        ]
+        default = 'gpt-4o'
+    elif provider == 'google':
+        options = [
+            {'label': 'Gemini 2.0 Flash (Experimental)', 'value': 'gemini-2.0-flash-exp'},
+            {'label': 'Gemini 1.5 Pro', 'value': 'gemini-1.5-pro'},
+            {'label': 'Gemini 1.5 Flash', 'value': 'gemini-1.5-flash'}
+        ]
+        default = 'gemini-1.5-pro'
+    elif provider == 'anthropic':
+        options = [
+            {'label': 'Claude Opus 4.5', 'value': 'claude-opus-4-5-20251101'},
+            {'label': 'Claude 3.5 Sonnet', 'value': 'claude-3-5-sonnet-20241022'},
+            {'label': 'Claude 3.5 Haiku', 'value': 'claude-3-5-haiku-20241022'}
+        ]
+        default = 'claude-3-5-sonnet-20241022'
+    else:
+        options = []
+        default = None
+
+    return options, default
+
+@app.callback(
     [Output('llm-interactions', 'data'),
      Output('llm-status', 'children'),
      Output('llm-results-display', 'children')],
     [Input('ask-llm-button', 'n_clicks')],
     [State('stored-columns', 'data'),
      State('llm-provider', 'value'),
+     State('llm-model', 'value'),
      State('llm-api-key', 'value'),
+     State('llm-data-description', 'value'),
      State('target-column', 'value'),
      State('resample-freq', 'value')]
 )
-def query_llm_for_interactions(n_clicks, columns, provider, api_key, target_column, resample_freq):
+def query_llm_for_interactions(n_clicks, columns, provider, model, api_key, data_description, target_column, resample_freq):
     if n_clicks == 0 or not columns or not LLM_AVAILABLE:
         if not LLM_AVAILABLE:
             return [], html.Div("LLM module not available", style={'color': 'red'}), []
@@ -1638,24 +1939,29 @@ def query_llm_for_interactions(n_clicks, columns, provider, api_key, target_colu
     
     if not api_key or not provider:
         return [], html.Div("Please provide API key and select provider", style={'color': 'red'}), []
-    
+
+    if not model:
+        return [], html.Div("Please select a model", style={'color': 'red'}), []
+
     if not target_column:
         return [], html.Div("Please select a target variable first", style={'color': 'red'}), []
-    
+
     try:
         # Filter out date columns for LLM query
         variables = [col for col in columns if col.lower() not in ['date', 'index']]
-        
+
         if len(variables) < 2:
             return [], html.Div("Need at least 2 variables for interaction discovery", style={'color': 'orange'}), []
-        
+
         llm_interactions, status_msg = get_llm_interactions(
-            variables, 
-            provider=provider, 
+            variables,
+            provider=provider,
             api_key=api_key,
+            model=model,
             target_variable=target_column,
             time_resolution=resample_freq,
-            debug=True 
+            data_description=data_description,
+            debug=True
         )
         
         
@@ -2061,15 +2367,544 @@ def create_output_folder_on_load(_):
     return output_folder
 
 @app.callback(
+    Output('load-results-status', 'children'),
+    Input('load-previous-results-button', 'n_clicks'),
+    State('previous-results-dropdown', 'value'),
+    prevent_initial_call=True
+)
+def load_previous_results_status(n_clicks, selected_folder):
+    """Show status when button is clicked."""
+    with open('load_results_debug.log', 'a') as f:
+        f.write(f"\n[{datetime.datetime.now()}] LOAD CALLBACK FIRED!\n")
+        f.write(f"  n_clicks={n_clicks}\n")
+        f.write(f"  selected_folder={selected_folder}\n")
+
+    if not selected_folder:
+        return html.Div([
+            html.I(className='fas fa-exclamation-triangle', style={'color': '#f59e0b', 'marginRight': '10px'}),
+            'Please select a results folder first'
+        ], style={'color': '#f59e0b', 'padding': '10px', 'backgroundColor': '#fef3c7', 'borderRadius': '8px'})
+
+    return html.Div([
+        html.I(className='fas fa-spinner fa-spin', style={'marginRight': '10px'}),
+        f'Loading {selected_folder}...'
+    ], style={'color': '#3b82f6', 'padding': '10px', 'backgroundColor': '#dbeafe', 'borderRadius': '8px'})
+
+@app.callback(
+    [Output('stored-output-folder', 'data', allow_duplicate=True),
+     Output('stored-filename', 'data', allow_duplicate=True),
+     Output('stored-columns', 'data', allow_duplicate=True),
+     Output('first-step-completed', 'data', allow_duplicate=True),
+     Output('output-data-upload', 'children', allow_duplicate=True),
+     Output('load-results-status', 'children', allow_duplicate=True),
+     Output('loaded-from-previous', 'data', allow_duplicate=True)],
+    Input('load-results-status', 'children'),
+    State('previous-results-dropdown', 'value'),
+    prevent_initial_call=True
+)
+def load_previous_results(status_update, selected_folder):
+    """Load all necessary files from a previous results folder."""
+    with open('load_results_debug.log', 'a') as f:
+        f.write(f"\n[{datetime.datetime.now()}] LOAD DATA CALLBACK FIRED!\n")
+        f.write(f"  selected_folder={selected_folder}\n")
+
+    if not selected_folder or status_update is None:
+        with open('load_results_debug.log', 'a') as f:
+            f.write(f"  PreventUpdate - no folder selected or status is None\n")
+        raise PreventUpdate
+
+    results_folder = os.path.join(os.getcwd(), "Results", selected_folder)
+    with open('load_results_debug.log', 'a') as f:
+        f.write(f"  Loading from: {results_folder}\n")
+
+    error_msg = html.Div([
+        html.I(className='fas fa-exclamation-circle', style={'color': '#ef4444', 'marginRight': '10px'}),
+        'Error loading folder'
+    ], style={'color': '#ef4444', 'padding': '10px', 'backgroundColor': '#fee', 'borderRadius': '8px'})
+
+    # Check if folder exists
+    if not os.path.exists(results_folder):
+        with open('load_results_debug.log', 'a') as f:
+            f.write(f"  ERROR: Folder not found: {results_folder}\n")
+        return (None, None, None, False, None, error_msg, False)
+
+    try:
+        # Try to load uploaded_data.csv (for new results)
+        uploaded_data_path = os.path.join(results_folder, 'uploaded_data.csv')
+        file_path_for_reanalysis = None  # Will store path for rerunning analysis
+
+        if os.path.exists(uploaded_data_path):
+            df = pd.read_csv(uploaded_data_path)
+            columns = df.columns.tolist()
+            data_source = "uploaded_data.csv"
+
+            # Create temp file for reanalysis
+            import tempfile
+            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.csv')
+            df.to_csv(temp_file.name, index=False)
+            temp_file.close()
+            file_path_for_reanalysis = temp_file.name
+
+            with open('load_results_debug.log', 'a') as f:
+                f.write(f"  Created temp file for reanalysis: {file_path_for_reanalysis}\n")
+        else:
+            # Fallback for older results: extract variables from CCM_ECCM_curated.csv
+            with open('load_results_debug.log', 'a') as f:
+                f.write(f"  WARNING: uploaded_data.csv not found, extracting variables from CCM results\n")
+
+            ccm_file = os.path.join(results_folder, 'CCM_ECCM_curated.csv')
+            if not os.path.exists(ccm_file):
+                with open('load_results_debug.log', 'a') as f:
+                    f.write(f"  ERROR: Neither uploaded_data.csv nor CCM_ECCM_curated.csv found\n")
+                return (None, None, None, False, None, error_msg, False)
+
+            # Extract unique variable names from CCM results
+            df_ccm = pd.read_csv(ccm_file)
+            x1_vars = set(df_ccm['x1'].unique())
+            x2_vars = set(df_ccm['x2'].unique())
+            columns = sorted(list(x1_vars | x2_vars))
+            df = None  # No data preview available
+            data_source = "CCM_ECCM_curated.csv (variables only)"
+
+        # Check if CCM analysis was completed (Step 1)
+        ccm_completed = os.path.exists(os.path.join(results_folder, 'CCM_ECCM_curated.csv'))
+
+        # Prepare data upload display
+        display_components = [
+            html.Div([
+                html.I(className='fas fa-folder-open', style={'color': '#10b981', 'fontSize': '1.5rem', 'marginRight': '10px'}),
+                html.H4(f'Loaded results from: {selected_folder}', style={'margin': '0', 'color': '#10b981', 'display': 'inline'})
+            ], style={'marginBottom': '20px', 'padding': '15px', 'backgroundColor': '#d1fae5', 'borderRadius': '10px', 'display': 'flex', 'alignItems': 'center'}),
+        ]
+
+        if df is not None:
+            # Show data preview if available
+            display_components.extend([
+                html.H5([html.I(className='fas fa-table', style={'marginRight': '10px'}), 'Data Preview'],
+                        style={'color': '#4f46e5', 'marginBottom': '15px'}),
+                html.Div([
+                    html.P(f"Rows: {len(df):,} | Columns: {len(df.columns)}",
+                           style={'color': '#6b7280', 'marginBottom': '15px', 'fontWeight': '500'}),
+                    dash_table.DataTable(
+                        data=df.head(10).to_dict('records'),
+                        columns=[{'name': i, 'id': i} for i in df.columns],
+                        style_table={'overflowX': 'auto'},
+                        style_cell={'textAlign': 'left', 'padding': '12px', 'fontFamily': 'Inter'},
+                        style_header={'backgroundColor': '#f9fafb', 'fontWeight': '600', 'color': '#374151'},
+                        style_data={'backgroundColor': 'white', 'color': '#1f2937'},
+                    )
+                ])
+            ])
+        else:
+            # Show variables list only
+            display_components.append(
+                html.Div([
+                    html.P([
+                        html.I(className='fas fa-info-circle', style={'marginRight': '8px'}),
+                        f'Variables found: {", ".join(columns)}'
+                    ], style={'color': '#6b7280', 'marginTop': '15px'}),
+                    html.P('Note: Original data not available (older results folder)',
+                           style={'color': '#f59e0b', 'fontSize': '0.9rem', 'marginTop': '10px'})
+                ])
+            )
+
+        upload_display = html.Div(display_components)
+
+        # Copy all result images to assets folder for display
+        assets_folder = 'assets'
+        image_extensions = ['.png', '.jpg', '.jpeg']
+        copied_images = 0
+
+        for file in os.listdir(results_folder):
+            if any(file.endswith(ext) for ext in image_extensions):
+                src = os.path.join(results_folder, file)
+                dst = os.path.join(assets_folder, file)
+                try:
+                    shutil.copy(src, dst)
+                    copied_images += 1
+                except Exception as e:
+                    pass
+
+        with open('load_results_debug.log', 'a') as f:
+            if df is not None:
+                f.write(f"  SUCCESS! Loaded {len(df)} rows, {len(columns)} columns from {data_source}\n")
+            else:
+                f.write(f"  SUCCESS! Loaded {len(columns)} variables from {data_source}\n")
+            f.write(f"  CCM completed: {ccm_completed}\n")
+            f.write(f"  Copied {copied_images} images to assets folder\n")
+
+        success_msg = html.Div([
+            html.I(className='fas fa-check-circle', style={'color': '#10b981', 'marginRight': '10px'}),
+            f'Successfully loaded results from {selected_folder}'
+        ], style={'color': '#10b981', 'padding': '10px', 'backgroundColor': '#d1fae5', 'borderRadius': '8px'})
+
+        return (
+            results_folder,
+            file_path_for_reanalysis,  # Actual file path for reanalysis (or None if no data file)
+            columns,
+            ccm_completed,
+            upload_display,
+            success_msg,
+            True  # Mark that we loaded from previous results
+        )
+
+    except Exception as e:
+        with open('load_results_debug.log', 'a') as f:
+            f.write(f"  ERROR: {str(e)}\n")
+            import traceback
+            f.write(traceback.format_exc())
+        return (None, None, None, False, None, error_msg, False)
+
+# Callback to display loaded results on the dashboard
+@app.callback(
+    [Output('first-step-results', 'children', allow_duplicate=True),
+     Output('second-step-results', 'children', allow_duplicate=True),
+     Output('third-step-results', 'children', allow_duplicate=True),
+     Output('second-step', 'style', allow_duplicate=True),
+     Output('third-step', 'style', allow_duplicate=True),
+     Output('fourth-step', 'style', allow_duplicate=True)],
+    [Input('first-step-completed', 'data')],
+    [State('stored-output-folder', 'data'),
+     State('loaded-from-previous', 'data')],
+    prevent_initial_call=True
+)
+def display_loaded_results(ccm_completed, output_folder, loaded_from_previous):
+    """Display results when loading previous results"""
+    import datetime
+
+    with open('load_results_debug.log', 'a') as f:
+        f.write(f"\n[{datetime.datetime.now()}] DISPLAY CALLBACK FIRED!\n")
+        f.write(f"  ccm_completed={ccm_completed}\n")
+        f.write(f"  output_folder={output_folder}\n")
+        f.write(f"  loaded_from_previous={loaded_from_previous}\n")
+
+    # Only display if loading previous results (not when running pipeline)
+    if not ccm_completed or not output_folder or not loaded_from_previous:
+        raise PreventUpdate
+
+    with open('load_results_debug.log', 'a') as f:
+        f.write(f"  Attempting to display results from: {output_folder}\n")
+
+    try:
+        # Check if output_folder exists and has results
+        if not os.path.exists(output_folder):
+            raise PreventUpdate
+
+        # Check which result files exist
+        ccm_files = [f for f in os.listdir(output_folder) if f.startswith('ccm_density_') and f.endswith('.png')]
+        eccm_files = [f for f in os.listdir(output_folder) if f.startswith('eccm_') and f.endswith('.png')]
+        surr_exists = os.path.exists(os.path.join(output_folder, 'Surr_plot.png'))
+        bn_exists = os.path.exists(os.path.join(output_folder, 'CausalDAG_NET.png'))
+
+        with open('load_results_debug.log', 'a') as f:
+            f.write(f"  Found {len(ccm_files)} CCM files\n")
+            f.write(f"  Found {len(eccm_files)} ECCM files\n")
+            f.write(f"  Surr_plot exists: {surr_exists}\n")
+            f.write(f"  BN results exist: {bn_exists}\n")
+
+        # Build first step results (CCM/ECCM)
+        first_step_results = None
+        if ccm_files or eccm_files:
+            # Load CSV data for controls
+            actual_table_data = None
+            try:
+                curated_file = os.path.join(output_folder, 'CCM_ECCM_curated.csv')
+                if os.path.exists(curated_file):
+                    df_csv = pd.read_csv(curated_file)
+                    if 'is_Valid' in df_csv.columns:
+                        df_csv['is_Valid'] = pd.to_numeric(df_csv['is_Valid'], errors='coerce').fillna(2).astype(int)
+                    actual_table_data = df_csv.to_dict('records')
+            except Exception as e:
+                with open('load_results_debug.log', 'a') as f:
+                    f.write(f"  Error loading CSV: {e}\n")
+
+            timestamp = str(int(datetime.datetime.now().timestamp()))
+            network_plot_path = os.path.join(output_folder, 'network_plot.png')
+
+            first_step_results = [html.Div(className='progress-section', children=[
+                html.Div(className='step-indicator', children=[
+                    html.Div('1', className='step-number'),
+                    html.H2('Initial Analysis Complete', className='step-title')
+                ]),
+                present_all_density_ccm_with_controls(output_folder, actual_table_data),
+                present_all_eccm_with_controls(output_folder, actual_table_data),
+                html.Div(className='parameter-card', children=[
+                    html.H3([html.I(className='fas fa-network-wired', style={'marginRight': '10px'}), 'Network Visualization'], className='card-title'),
+                    html.Div(style={'textAlign': 'center'}, children=[
+                        html.Img(src=f'assets/network_plot.png?t={timestamp}', style={'maxWidth': '100%', 'height': 'auto', 'borderRadius': '10px'})
+                    ])
+                ]) if os.path.exists(network_plot_path) else None
+            ])]
+
+        # Build second step results (Surrogate analysis)
+        second_step_results = None
+        if surr_exists:
+            # Copy surrogate plot to assets
+            surr_plot_source = os.path.join(output_folder, 'Surr_plot.png')
+            surr_plot_dest = os.path.join('assets', 'Surr_plot.png')
+            if os.path.exists(surr_plot_source):
+                shutil.copy(surr_plot_source, surr_plot_dest)
+
+            # Also copy network plot
+            network_plot_source = os.path.join(output_folder, 'network_plot.png')
+            network_plot_dest = os.path.join('assets', 'network_plot.png')
+            if os.path.exists(network_plot_source):
+                shutil.copy(network_plot_source, network_plot_dest)
+
+            timestamp = str(int(datetime.datetime.now().timestamp()))
+            second_step_results = [html.Div(className='progress-section', children=[
+                html.Div(className='step-indicator', children=[
+                    html.Div('3', className='step-number'),
+                    html.H2('Surrogate Analysis Complete', className='step-title')
+                ]),
+                html.Div(className='parameter-card', children=[
+                    html.H3([html.I(className='fas fa-chart-bar', style={'marginRight': '10px'}), 'Surrogate Analysis Results'], className='card-title'),
+                    html.Div(className='results-gallery', children=[
+                        html.Div(className='result-card', children=[
+                            html.Div(style={'padding': '15px', 'background': '#f8fafc'}, children=[
+                                html.H4('Updated Network Visualization', style={'margin': '0 0 10px 0', 'color': '#374151'})
+                            ]),
+                            html.Img(src=f'assets/network_plot.png?t={timestamp}', style={'width': '100%', 'height': 'auto'})
+                        ]),
+                        html.Div(className='result-card', children=[
+                            html.Div(style={'padding': '15px', 'background': '#f8fafc'}, children=[
+                                html.H4('Surrogate Analysis Results', style={'margin': '0 0 10px 0', 'color': '#374151'})
+                            ]),
+                            html.Img(src=f'/assets/Surr_plot.png?t={timestamp}', style={'width': '100%', 'height': 'auto'})
+                        ])
+                    ])
+                ])
+            ])]
+
+        # Build third step results (BN)
+        third_step_results = None
+        if bn_exists:
+            # Define present_all_bn_results inline since it's defined inside run_pipeline
+            def present_all_bn_results_loaded(output_folder):
+                expected_files = [
+                    "CausalDAG_NET.png",
+                    "BN_model_confusionMatrix.png",
+                    "BN_model_results.png",
+                    "BN_model_validation.png",
+                    "sensitivity_barplot.png",
+                    "CausalDAG_NET_MEAN_MAX.png",
+                    "CausalDAG_NET_MEAN_MIN.png",
+                ]
+
+                assets_folder = 'assets/'
+                image_files = [f for f in expected_files if os.path.exists(os.path.join(output_folder, f))]
+
+                for img in image_files:
+                    shutil.copy(os.path.join(output_folder, img), os.path.join(assets_folder, img))
+
+                timestamp = str(int(datetime.datetime.now().timestamp()))
+
+                return html.Div(className='parameter-card', children=[
+                    html.H3([html.I(className='fas fa-brain', style={'marginRight': '10px'}), 'Bayesian Network Results'], className='card-title'),
+
+                    html.Div(className='results-gallery', children=[
+                        html.Div(className='result-card', children=[
+                            html.Div(style={'padding': '15px', 'background': '#f8fafc'}, children=[
+                                html.H4('Causal Network', style={'margin': '0 0 10px 0', 'color': '#374151'})
+                            ]),
+                            html.Img(src=f'/assets/CausalDAG_NET.png?t={timestamp}', style={'width': '100%', 'height': 'auto'})
+                        ]) if 'CausalDAG_NET.png' in image_files else None,
+                    ]),
+
+                    html.H4([html.I(className='fas fa-chart-bar', style={'marginRight': '10px'}), 'Model Performance'],
+                            style={'marginTop': '40px', 'marginBottom': '20px', 'color': '#4f46e5'}),
+                    html.Div(className='results-gallery', children=[
+                        html.Div(className='result-card', children=[
+                            html.Div(style={'padding': '15px', 'background': '#f8fafc'}, children=[
+                                html.H4('Model Validation', style={'margin': '0 0 10px 0', 'color': '#374151'})
+                            ]),
+                            html.Img(src=f'/assets/BN_model_validation.png?t={timestamp}', style={'width': '100%', 'height': 'auto'})
+                        ]) if 'BN_model_validation.png' in image_files else None,
+
+                        html.Div(className='result-card', children=[
+                            html.Div(style={'padding': '15px', 'background': '#f8fafc'}, children=[
+                                html.H4('Prediction Results', style={'margin': '0 0 10px 0', 'color': '#374151'})
+                            ]),
+                            html.Img(src=f'/assets/BN_model_results.png?t={timestamp}', style={'width': '100%', 'height': 'auto'})
+                        ]) if 'BN_model_results.png' in image_files else None,
+
+                        html.Div(className='result-card', children=[
+                            html.Div(style={'padding': '15px', 'background': '#f8fafc'}, children=[
+                                html.H4('Confusion Matrix', style={'margin': '0 0 10px 0', 'color': '#374151'})
+                            ]),
+                            html.Img(src=f'/assets/BN_model_confusionMatrix.png?t={timestamp}', style={'width': '100%', 'height': 'auto'})
+                        ]) if 'BN_model_confusionMatrix.png' in image_files else None,
+
+                        html.Div(className='result-card', children=[
+                            html.Div(style={'padding': '15px', 'background': '#f8fafc'}, children=[
+                                html.H4('Sensitivity Analysis', style={'margin': '0 0 10px 0', 'color': '#374151'})
+                            ]),
+                            html.Img(src=f'/assets/sensitivity_barplot.png?t={timestamp}', style={'width': '100%', 'height': 'auto'})
+                        ]) if 'sensitivity_barplot.png' in image_files else None,
+                    ]),
+
+                    html.H4([html.I(className='fas fa-arrow-up', style={'marginRight': '10px'}), 'High Probability Scenarios'],
+                            style={'marginTop': '40px', 'marginBottom': '20px', 'color': '#4f46e5'}),
+                    html.P('This diagram shows the average variable values across all high probability scenarios.',
+                           style={'marginBottom': '20px', 'color': '#6b7280', 'fontStyle': 'italic'}),
+                    html.Div(className='results-gallery', children=[
+                        html.Div(className='result-card', children=[
+                            html.Div(style={'padding': '15px', 'background': '#f8fafc'}, children=[
+                                html.H4('Mean High Probability Scenario', style={'margin': '0 0 10px 0', 'color': '#374151'})
+                            ]),
+                            html.Img(src=f'/assets/CausalDAG_NET_MEAN_MAX.png?t={timestamp}', style={'width': '100%', 'height': 'auto'})
+                        ]) if 'CausalDAG_NET_MEAN_MAX.png' in image_files else None,
+                    ]),
+
+                    html.H4([html.I(className='fas fa-arrow-down', style={'marginRight': '10px'}), 'Low Probability Scenarios'],
+                            style={'marginTop': '40px', 'marginBottom': '20px', 'color': '#4f46e5'}),
+                    html.P('This diagram shows the average variable values across all low probability scenarios.',
+                           style={'marginBottom': '20px', 'color': '#6b7280', 'fontStyle': 'italic'}),
+                    html.Div(className='results-gallery', children=[
+                        html.Div(className='result-card', children=[
+                            html.Div(style={'padding': '15px', 'background': '#f8fafc'}, children=[
+                                html.H4('Mean Low Probability Scenario', style={'margin': '0 0 10px 0', 'color': '#374151'})
+                            ]),
+                            html.Img(src=f'/assets/CausalDAG_NET_MEAN_MIN.png?t={timestamp}', style={'width': '100%', 'height': 'auto'})
+                        ]) if 'CausalDAG_NET_MEAN_MIN.png' in image_files else None,
+                    ])
+                ])
+
+            third_step_results = [html.Div(className='progress-section', children=[
+                html.Div(className='step-indicator', children=[
+                    html.Div('5', className='step-number'),
+                    html.H2('Bayesian Network Analysis Complete', className='step-title')
+                ]),
+                present_all_bn_results_loaded(output_folder)
+            ])]
+
+        # Determine visibility of step sections
+        second_step_style = {'display': 'block'} if (first_step_results or second_step_results or third_step_results) else {'display': 'none'}
+        third_step_style = {'display': 'block'} if (first_step_results or second_step_results or third_step_results) else {'display': 'none'}
+        fourth_step_style = {'display': 'block'} if third_step_results else {'display': 'none'}
+
+        with open('load_results_debug.log', 'a') as f:
+            f.write(f"  Successfully built result displays\n")
+            f.write(f"  first_step_results: {first_step_results is not None}\n")
+            f.write(f"  second_step_results: {second_step_results is not None}\n")
+            f.write(f"  third_step_results: {third_step_results is not None}\n")
+
+        return (first_step_results, second_step_results, third_step_results,
+                second_step_style, third_step_style, fourth_step_style)
+
+    except Exception as e:
+        with open('load_results_debug.log', 'a') as f:
+            f.write(f"  ERROR in display callback: {e}\n")
+            import traceback
+            f.write(f"  {traceback.format_exc()}\n")
+        raise PreventUpdate
+
+# Callback to populate parameters when loading previous results
+@app.callback(
+    [Output('target-column', 'value', allow_duplicate=True),
+     Output('confounder-columns', 'value', allow_duplicate=True),
+     Output('subset-length', 'value', allow_duplicate=True),
+     Output('jump-n', 'value', allow_duplicate=True),
+     Output('z-score-threshold', 'value', allow_duplicate=True),
+     Output('resample-freq', 'value', allow_duplicate=True),
+     Output('embedding-dim', 'value', allow_duplicate=True),
+     Output('lag', 'value', allow_duplicate=True),
+     Output('eccm-window-size', 'value', allow_duplicate=True),
+     Output('number-of-cores', 'value', allow_duplicate=True),
+     Output('ccm-training-proportion', 'value', allow_duplicate=True),
+     Output('max-mutual-info-shift', 'value', allow_duplicate=True),
+     Output('num-surrogates-x1', 'value', allow_duplicate=True),
+     Output('num-surrogates-x2', 'value', allow_duplicate=True),
+     Output('sig-quant', 'value', allow_duplicate=True),
+     Output('bn-training-fraction', 'value', allow_duplicate=True),
+     Output('probability-cutoff', 'value', allow_duplicate=True),
+     Output('bidirectional-interaction', 'value', allow_duplicate=True),
+     Output('conv-skill-threshold', 'value', allow_duplicate=True),
+     Output('conv-variance-threshold', 'value', allow_duplicate=True),
+     Output('conv-min-improvement', 'value', allow_duplicate=True),
+     Output('prefer-zero-lag', 'value', allow_duplicate=True),
+     Output('significance-filter-mode', 'value', allow_duplicate=True)],
+    [Input('stored-output-folder', 'data')],
+    [State('loaded-from-previous', 'data')],
+    prevent_initial_call=True
+)
+def populate_parameters_from_loaded_results(output_folder, loaded_from_previous):
+    """Populate parameter fields when loading previous results"""
+    import datetime
+
+    with open('load_results_debug.log', 'a') as f:
+        f.write(f"\n[{datetime.datetime.now()}] POPULATE PARAMETERS CALLBACK FIRED!\n")
+        f.write(f"  output_folder={output_folder}\n")
+        f.write(f"  loaded_from_previous={loaded_from_previous}\n")
+
+    # Only populate when loading from previous results
+    if not output_folder or not loaded_from_previous:
+        raise PreventUpdate
+
+    try:
+        params = read_parameters_from_file(output_folder)
+
+        with open('load_results_debug.log', 'a') as f:
+            f.write(f"  Loaded {len(params)} parameters\n")
+            f.write(f"  Parameters: {list(params.keys())}\n")
+
+        # Map parameters to dashboard fields
+        target_column = params.get('target_column', dash.no_update)
+        confounders = params.get('confounders', dash.no_update)
+        subset_length = params.get('subSetLength', dash.no_update)
+        jump_n = params.get('jumpN', dash.no_update)
+        z_score_threshold = params.get('z_score_threshold', dash.no_update)
+        resample_freq = params.get('resample_freq', dash.no_update)
+        embedding_dim = params.get('embedding_dim', dash.no_update)
+        lag = params.get('lag', dash.no_update)
+        eccm_window_size = params.get('eccm_window_size', dash.no_update)
+        number_of_cores = params.get('number_of_cores', dash.no_update)
+        ccm_training_proportion = params.get('ccm_training_proportion', dash.no_update)
+        max_mi_shift = params.get('max_mi_shift', dash.no_update)
+        num_surrogates_x1 = params.get('num_surrogates_x1', dash.no_update)
+        num_surrogates_x2 = params.get('num_surrogates_x2', dash.no_update)
+        sig_quant = params.get('sig_quant', dash.no_update)
+        bn_training_fraction = params.get('bn_training_fraction', dash.no_update)
+        probability_cutoff = params.get('probability_cutoff', dash.no_update)
+        bidirectional_interaction = params.get('bidirectional_interaction', dash.no_update)
+        conv_skill_threshold = params.get('conv_skill_threshold', dash.no_update)
+        conv_variance_threshold = params.get('conv_variance_threshold', dash.no_update)
+        conv_min_improvement = params.get('conv_min_improvement', dash.no_update)
+        prefer_zero_lag = params.get('prefer_zero_lag', dash.no_update)
+        significance_filter_mode = params.get('significance_filter_mode', dash.no_update)
+
+        with open('load_results_debug.log', 'a') as f:
+            f.write(f"  Successfully populated parameters\n")
+            f.write(f"  target_column: {target_column}\n")
+            f.write(f"  confounders: {confounders}\n")
+            f.write(f"  subset_length: {subset_length}\n")
+            f.write(f"  significance_filter_mode: {significance_filter_mode}\n")
+
+        return (target_column, confounders, subset_length, jump_n, z_score_threshold,
+                resample_freq, embedding_dim, lag, eccm_window_size, number_of_cores,
+                ccm_training_proportion, max_mi_shift, num_surrogates_x1, num_surrogates_x2,
+                sig_quant, bn_training_fraction, probability_cutoff, bidirectional_interaction,
+                conv_skill_threshold, conv_variance_threshold, conv_min_improvement, prefer_zero_lag,
+                significance_filter_mode)
+
+    except Exception as e:
+        with open('load_results_debug.log', 'a') as f:
+            f.write(f"  ERROR populating parameters: {e}\n")
+            import traceback
+            f.write(f"  {traceback.format_exc()}\n")
+        raise PreventUpdate
+
+@app.callback(
     [Output('output-data-upload', 'children'),
      Output('target-column', 'options'),
      Output('confounder-columns', 'options'),
      Output('stored-filename', 'data'),
      Output('stored-columns', 'data')],
     [Input('upload-data', 'contents')],
-    [State('upload-data', 'filename')]
+    [State('upload-data', 'filename'),
+     State('stored-output-folder', 'data')]
 )
-def update_output(contents, filename):
+def update_output(contents, filename, output_folder):
     if contents is not None:
         content_type, content_string = contents.split(',')
         decoded = base64.b64decode(content_string)
@@ -2078,6 +2913,12 @@ def update_output(contents, filename):
             temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.csv')
             df.to_csv(temp_file.name, index=False)
             temp_file.close()
+
+            # Save uploaded dataset to results folder for reproducibility
+            if output_folder and os.path.exists(output_folder):
+                uploaded_data_path = os.path.join(output_folder, 'uploaded_data.csv')
+                df.to_csv(uploaded_data_path, index=False)
+                print(f"✓ Saved uploaded dataset to: {uploaded_data_path}")
 
             columns_options = [{'label': col, 'value': col} for col in df.columns if col.lower() != 'date']
             columns = df.columns.tolist()
@@ -2321,7 +3162,7 @@ def save_edited_table(n_clicks, rows, columns, output_folder):
                 ])
             ], style={'marginTop': '20px'}), dropdown_options)
         except Exception as e:
-            return (html.Div(f"❌ Failed to save edits: {str(e)}", style={'color': 'red', 'marginTop': '20px'}), dropdown_options)
+            return (html.Div(f"X Failed to save edits: {str(e)}", style={'color': 'red', 'marginTop': '20px'}), dropdown_options)
     
     return ('', dropdown_options)
 
@@ -2931,18 +3772,21 @@ def apply_scenario(n_clicks, scenario_type, scenario_index, model_data, input_id
      State('bn-training-fraction', 'value'),
      State('probability-cutoff', 'value'),
      State('bidirectional-interaction', 'value'),
-     State('check-convergence', 'value'),
+     State('significance-filter-mode', 'value'),
+     State('conv-skill-threshold', 'value'),
+    State('conv-variance-threshold', 'value'),
+    State('conv-min-improvement', 'value'),
      State('prefer-zero-lag', 'value'),
      State('known-interactions', 'data'),
-     State('first-step-results', 'children'),   
-     State('second-step-results', 'children'),  
+     State('first-step-results', 'children'),
+     State('second-step-results', 'children'),
      State('third-step-results', 'children'),
      State('table-editing', 'data')]
 )
 def run_pipeline(n_clicks_run, n_clicks_second, n_clicks_final, target_column, confounders, subSetLength, jumpN, z_score_threshold, resample_freq,
                  embedding_dim, lag, eccm_window_size, file_path, output_folder, number_of_cores, ccm_training_prop, max_mi_shift,
                  num_surrogates_x1, num_surrogates_x2, sig_quant, categorization_mode, categorization_filepath,
-                 bn_training_fraction, probability_cutoff, bidirectional_interaction, check_convergence, prefer_zero_lag, known_interactions,
+                 bn_training_fraction, probability_cutoff, bidirectional_interaction, significance_filter_mode, conv_skill_threshold, conv_variance_threshold, conv_min_improvement, prefer_zero_lag, known_interactions,
                  current_first_results, current_second_results, current_third_results, current_table_data):
     ctx = dash.callback_context
     if not ctx.triggered:
@@ -3070,7 +3914,10 @@ def run_pipeline(n_clicks_run, n_clicks_second, n_clicks_final, target_column, c
         "number_of_cores": number_of_cores,
         "ccm_training_proportion": ccm_training_prop,
         "max_mi_shift": max_mi_shift,
-        "check_convergence": check_convergence,
+        "check_convergence": "density",
+        "conv_skill_threshold": conv_skill_threshold,
+        "conv_variance_threshold": conv_variance_threshold,
+        "conv_min_improvement": conv_min_improvement,
         "prefer_zero_lag": prefer_zero_lag,
         "known_interactions": known_interactions,
     }
@@ -3098,7 +3945,10 @@ def run_pipeline(n_clicks_run, n_clicks_second, n_clicks_final, target_column, c
             '--number_of_cores', str(number_of_cores),
             '--ccm_training_proportion', str(ccm_training_prop),
             '--max_mi_shift', str(max_mi_shift),
-            '--check_convergence', str(check_convergence),
+            '--check_convergence', 'density',
+            '--conv_skill_threshold', str(conv_skill_threshold),
+            '--conv_variance_threshold', str(conv_variance_threshold),
+            '--conv_min_improvement', str(conv_min_improvement),
             '--prefer_zero_lag', str(prefer_zero_lag)
         ]
         
@@ -3225,11 +4075,11 @@ def run_pipeline(n_clicks_run, n_clicks_second, n_clicks_final, target_column, c
                     pass
             
             process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            stdout, stderr = process.communicate()  # No timeout - can take days
+            stdout, stderr = process.communicate(timeout=360000)  # 100 hours timeout like step 1
     
             if process.returncode != 0:
                 error_msg = f'Error in Surrogates step execution (return code: {process.returncode}): {stderr.decode()}'
-                return error_msg, '', error_msg, '', {'display': 'none'}, current_first_results, current_second_results, current_third_results, {'display': 'block'}, {'display': 'block'}, {'display': 'none'}, True
+                return error_msg, error_msg, error_msg, '', {'display': 'none'}, current_first_results, current_second_results, current_third_results, {'display': 'block'}, {'display': 'block'}, {'display': 'none'}, True
     
             surr_plot_source = os.path.join(output_folder, 'Surr_plot.png')
             surr_plot_dest = os.path.join('assets', 'Surr_plot.png')
@@ -3313,14 +4163,21 @@ def run_pipeline(n_clicks_run, n_clicks_second, n_clicks_final, target_column, c
             if not surrogate_plot_available:
                 success_msg += ' (Note: Surrogate plot was not generated)'
             
-            return (success_msg, '', '', '', {'display': 'none'}, 
+            return (success_msg, '', success_msg, '', {'display': 'none'}, 
                     current_first_results, second_step_results, current_third_results,  
                     {'display': 'block'}, {'display': 'block'}, {'display': 'none'}, True)
                 
+        except subprocess.TimeoutExpired:
+            try:
+                process.kill()
+                process.wait()
+            except:
+                pass
+            return 'Surrogates process timed out after 100 hours.', 'Surrogates process timed out after 100 hours.', 'Surrogates process timed out after 100 hours.', '', {'display': 'none'}, current_first_results, current_second_results, current_third_results, {'display': 'block'}, {'display': 'block'}, {'display': 'none'}, True
         except Exception as e:
             import traceback
             error_msg = f'Error running Surrogates: {str(e)}\n{traceback.format_exc()}'
-            return error_msg, '', error_msg, '', {'display': 'none'}, current_first_results, current_second_results, current_third_results, {'display': 'block'}, {'display': 'block'}, {'display': 'none'}, True
+            return error_msg, error_msg, error_msg, '', {'display': 'none'}, current_first_results, current_second_results, current_third_results, {'display': 'block'}, {'display': 'block'}, {'display': 'none'}, True
 
     elif button_id == 'run-final-step':
         categorization = categorization_filepath if categorization_mode == 'upload' else 'auto'
@@ -3338,13 +4195,14 @@ def run_pipeline(n_clicks_run, n_clicks_second, n_clicks_final, target_column, c
             "number_of_random_vecs": number_of_random_vecs,
             "probability_cutoff": probability_cutoff,
             "bidirectional_interaction": bidirectional_interaction,
+            "significance_filter_mode": significance_filter_mode,
         }
         write_parameters_to_file(output_folder, step_name, {**common_params, **step_params})
 
         command = [
             'python', '3_BN.py',
             '--file_path', file_path,
-            '--output_folder', output_folder+"/",            
+            '--output_folder', output_folder+"/",
             '--target_column', target_column,
             '--confounders', ','.join(confounders) if confounders else "",
             '--subSetLength', str(subSetLength),
@@ -3362,6 +4220,7 @@ def run_pipeline(n_clicks_run, n_clicks_second, n_clicks_final, target_column, c
             '--number_of_random_vecs', str(number_of_random_vecs),
             '--probability_cutoff', str(probability_cutoff),
             '--bidirectional_interaction', bidirectional_interaction,
+            '--significance_filter_mode', significance_filter_mode,
         ]
         
         try:

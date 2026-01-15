@@ -5,15 +5,16 @@
 """
 import numpy as np
 import pandas as pd
-import pickle 
+import pickle
 import matplotlib
-matplotlib.use('Agg')  
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import pyEDM
 from sklearn.preprocessing import MinMaxScaler
 from scipy import stats
 import os
 from statsmodels.tsa.stattools import adfuller
+from statsmodels.stats.multitest import multipletests
 import argparse
 
 
@@ -62,6 +63,7 @@ parser.add_argument('--max_mi_shift', type=int, default=20, help='max_mutual_inf
 parser.add_argument('--num_surrogates_x1', type=int, default=10, help='Number of surrogates for x1')
 parser.add_argument('--num_surrogates_x2', type=int, default=10, help='Number of surrogates for x2')
 parser.add_argument('--sig_quant', type=float, default=0.9, help='Significance quantile')
+parser.add_argument('--preserve_manual_edits', type=str, default='False', help='Preserve manual edits flag')
 
 
 args = parser.parse_args()
@@ -79,6 +81,7 @@ max_mi_shift = int(args.max_mi_shift)
 num_surrogates_x1 = int(args.num_surrogates_x1)
 num_surrogates_x2 = int(args.num_surrogates_x2)
 sig_quant = float(args.sig_quant)
+preserve_manual_edits = args.preserve_manual_edits == 'True'
 output_folder = args.output_folder
 
 if not output_folder.endswith(os.sep):
@@ -95,6 +98,19 @@ BaseFolder = "./"
 concated_ = load_data(file_path)
 print("processing data....")
 
+# Check if manual edits should be preserved
+manual_edits_flag = os.path.join(output_folder, 'MANUAL_EDITS_MADE.flag')
+if preserve_manual_edits and os.path.exists(manual_edits_flag):
+    print("Manual edits detected - preserving user changes")
+    # Work with a copy to avoid overwriting manual edits
+    curated_backup = os.path.join(output_folder, 'CCM_ECCM_curated_original.csv')
+    curated_main = os.path.join(output_folder, 'CCM_ECCM_curated.csv')
+    if not os.path.exists(curated_backup):
+        # Create backup of manually edited version
+        import shutil
+        shutil.copy(curated_main, curated_backup)
+        print(f"Created backup of manual edits: {curated_backup}")
+        
 try:
     concated_['Date'] = pd.to_datetime(concated_['Date'])
     concated_ = concated_.set_index('Date')
@@ -309,6 +325,119 @@ df_quantiles90 = pd.DataFrame(data=All_quantiles90, columns=["x1x2", "Score"])
 df_quantiles90 = df_quantiles90.reset_index()
 
 
+# ============================================================================
+# FIX 1.2: MULTIPLE TESTING CORRECTION (FDR - Benjamini-Hochberg)
+# ============================================================================
+print("\n" + "="*70)
+print("CALCULATING EMPIRICAL P-VALUES AND FDR CORRECTION")
+print("="*70)
+
+# Calculate empirical p-values for each variable pair
+pvalue_results = []
+
+for pair in df_truth["x1x2"].unique():
+    # Get observed score for this pair
+    observed_score = df_truth[df_truth["x1x2"] == pair]["Score"].values
+
+    if len(observed_score) == 0:
+        print(f"  Warning: No observed score for pair {pair}")
+        continue
+
+    observed_score = observed_score[0]
+
+    # Get all surrogate scores for this pair
+    surrogate_scores = df_AllSurr[df_AllSurr["x1x2"] == pair]["Score"].values
+
+    if len(surrogate_scores) == 0:
+        print(f"  Warning: No surrogate scores for pair {pair}")
+        continue
+
+    # Calculate empirical p-value
+    # p = (number of surrogates >= observed + 1) / (total surrogates + 1)
+    # This is the standard formula that avoids p=0
+    r = np.sum(surrogate_scores >= observed_score)
+    n = len(surrogate_scores)
+    p_value = (r + 1) / (n + 1)
+
+    # Get x1 and x2 separately
+    x1, x2 = pair.split('_', 1)
+
+    pvalue_results.append({
+        'x1': x1,
+        'x2': x2,
+        'pair': pair,
+        'observed_score': observed_score,
+        'n_surrogates': n,
+        'n_exceeding': r,
+        'p_value_raw': p_value
+    })
+
+# Create DataFrame
+df_pvalues = pd.DataFrame(pvalue_results)
+
+if len(df_pvalues) > 0:
+    print(f"\nCalculated p-values for {len(df_pvalues)} variable pairs")
+    print(f"Number of surrogates per pair: {df_pvalues['n_surrogates'].iloc[0]}")
+
+    # Apply FDR correction (Benjamini-Hochberg procedure)
+    # multipletests returns: reject, pvals_corrected, alphacSidak, alphacBonf
+    alpha = 0.05
+    reject, pvals_corrected, alphac_sidak, alphac_bonf = multipletests(
+        df_pvalues['p_value_raw'].values,
+        alpha=alpha,
+        method='fdr_bh'
+    )
+
+    # Add corrected values to DataFrame
+    df_pvalues['p_value_fdr'] = pvals_corrected
+    df_pvalues['significant_raw'] = df_pvalues['p_value_raw'] < alpha
+    df_pvalues['significant_fdr'] = reject
+
+    # Calculate statistics
+    n_sig_raw = df_pvalues['significant_raw'].sum()
+    n_sig_fdr = df_pvalues['significant_fdr'].sum()
+    n_rejected = n_sig_raw - n_sig_fdr
+
+    # Sort by FDR-corrected p-value
+    df_pvalues = df_pvalues.sort_values('p_value_fdr')
+
+    # Save to CSV
+    try:
+        csv_path = output_folder + 'surrogate_pvalues_corrected.csv'
+        df_pvalues.to_csv(csv_path, index=False)
+        print(f"\n✓ Saved p-values to: {csv_path}")
+    except Exception as e:
+        print(f"\n!  Warning: Could not save p-values CSV: {e}")
+
+    # Report results
+    print("\n" + "="*70)
+    print("FDR CORRECTION RESULTS")
+    print("="*70)
+    print(f"Total variable pairs tested: {len(df_pvalues)}")
+    print(f"Significant pairs (raw p < {alpha}): {n_sig_raw}")
+    print(f"Significant pairs (FDR-corrected): {n_sig_fdr}")
+    print(f"False discoveries prevented: {n_rejected}")
+    print(f"FDR correction rate: {n_rejected/n_sig_raw*100:.1f}%" if n_sig_raw > 0 else "N/A")
+
+    # Show top 5 most significant pairs
+    if len(df_pvalues) > 0:
+        print("\nTop 5 most significant causal pairs (FDR-corrected):")
+        print("-" * 70)
+        top5 = df_pvalues.head(5)
+        for idx, row in top5.iterrows():
+            sig_marker = "✓" if row['significant_fdr'] else "✗"
+            print(f"  {sig_marker} {row['x1']:20s} → {row['x2']:20s} | "
+                  f"p_raw={row['p_value_raw']:.4f}, p_fdr={row['p_value_fdr']:.4f}")
+
+    print("="*70)
+else:
+    print("\n!  Warning: No p-values calculated")
+
+# ============================================================================
+# END FDR CORRECTION
+# ============================================================================
+
+
 def save_surrogate_plot(output_folder, df_AllSurr, df_truth, df_quantiles90):
     """
     Robust function to create and save surrogate plot
@@ -381,7 +510,7 @@ if not success:
         ax.axis('off')
         
         fallback_path = os.path.join(output_folder, 'Surr_plot.png')
-        plt.savefig(fallback_path, dpi=150, bbox_inches='tight')
+        plt.savefig(fallback_path, dpi=300, bbox_inches='tight')
         plt.close(fig)
         print(f"Created fallback plot at: {fallback_path}")
     except Exception as e:
@@ -403,7 +532,47 @@ df_quantiles90.columns = ["x1x2", "Score_quantile"]
 df_quantiles90["Score_quantile"] = df_quantiles90["Score_quantile"].round(2)
 
 df_CausalFeatures2 = pd.merge(df_CausalFeatures2, df_quantiles90, on="x1x2")
-df_CausalFeatures2 = df_CausalFeatures2[df_CausalFeatures2["Score"] >= df_CausalFeatures2["Score_quantile"]]
+
+# Apply BOTH filters: quantile threshold (raw p-value) AND FDR significance
+n_before = len(df_CausalFeatures2)
+
+# Calculate the alpha threshold from sig_quant
+# If sig_quant = 0.95, we want p_value <= 0.05 (top 5%)
+# If sig_quant = 0.90, we want p_value <= 0.10 (top 10%)
+alpha_quantile = 1.0 - sig_quant
+
+print(f"\n--- SURROGATE FILTERING ---")
+print(f"sig_quant = {sig_quant} → alpha = {alpha_quantile}")
+
+if len(df_pvalues) > 0:
+    # Merge p-values (both raw and FDR-corrected)
+    df_pvalues_for_merge = df_pvalues[['pair', 'p_value_raw', 'p_value_fdr', 'significant_fdr']].copy()
+    df_pvalues_for_merge.columns = ['x1x2', 'p_value_raw', 'p_value_fdr', 'significant_fdr']
+    df_CausalFeatures2 = pd.merge(df_CausalFeatures2, df_pvalues_for_merge, on="x1x2", how="left")
+
+    # Filter 1: Raw p-value must be <= alpha (score in top percentile as specified by sig_quant)
+    quantile_mask = df_CausalFeatures2["p_value_raw"] <= alpha_quantile
+    n_pass_quantile = quantile_mask.sum()
+    print(f"Quantile filter (p_value_raw <= {alpha_quantile}): {n_pass_quantile}/{n_before} pass")
+
+    # Filter 2: FDR significance
+    fdr_mask = df_CausalFeatures2["significant_fdr"] == True
+    n_pass_fdr = fdr_mask.sum()
+    print(f"FDR filter (p_value_fdr < 0.05): {n_pass_fdr}/{n_before} pass")
+
+    # Apply BOTH filters
+    combined_mask = quantile_mask & fdr_mask
+    df_CausalFeatures2 = df_CausalFeatures2[combined_mask]
+    n_after = len(df_CausalFeatures2)
+
+    print(f"Combined (BOTH must pass): {n_before} → {n_after} interactions ({n_before - n_after} removed)")
+else:
+    # Fallback to score-based quantile filtering if no p-values available
+    print("\n!  No p-values available, using score threshold filtering only")
+    quantile_mask = df_CausalFeatures2["Score"] >= df_CausalFeatures2["Score_quantile"]
+    df_CausalFeatures2 = df_CausalFeatures2[quantile_mask]
+    n_after = len(df_CausalFeatures2)
+    print(f"Quantile only: {n_before} → {n_after} interactions ({n_before - n_after} removed)")
 
 try:
     del df_CausalFeatures2['Unnamed: 0']

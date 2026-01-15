@@ -17,6 +17,7 @@ import pydot
 from sklearn.metrics import confusion_matrix, accuracy_score
 #from random import randrange
 from sklearn.metrics import roc_auc_score
+from sklearn.model_selection import StratifiedKFold
 from decimal import Decimal, ROUND_HALF_UP
 from scipy.stats import mannwhitneyu
 import pickle
@@ -256,36 +257,72 @@ def filter_bidirectional_interactions(df, criterion='higher'):
 
 def create_principled_dag(df_edges, target_columns, confounders, output_folder="./"):
     """
+    FIX 2.2: Enhanced DAG construction with comprehensive logging
+
     Create DAG following exact logic rules:
     1. Discard sink nodes (except targets)
     2. Find feedback loops
     3. Cut feedback loop far from target, close to confounders
     4. Use CCM score to decide where to cut
     5. Iterate until no sink nodes or feedback loops
-    """
-    print(f"Creating DAG from {len(df_edges)} edges...")
-    
 
-    G = nx.from_pandas_edgelist(df_edges, 'x1', 'x2', 
-                                edge_attr=['Score', 'timeToEffect'], 
+    All decisions logged to CSV and summary text file for transparency.
+    """
+    print("\n" + "="*70)
+    print("DAG CONSTRUCTION WITH TRANSPARENCY LOGGING")
+    print("="*70)
+    print(f"Starting with {len(df_edges)} edges...")
+    print(f"Target variables: {target_columns}")
+    print(f"Confounders: {confounders}")
+
+
+    G = nx.from_pandas_edgelist(df_edges, 'x1', 'x2',
+                                edge_attr=['Score', 'timeToEffect'],
                                 create_using=nx.DiGraph())
-    
+
     removed_edges = []
     removed_nodes = []
     iteration = 0
-    max_iterations = len(df_edges) * 2  
+    max_iterations = len(df_edges) * 2
+
+    # FIX 2.2: Comprehensive logging structure
+    dag_log = []  # Will be saved to CSV  
     
     while iteration < max_iterations:
         iteration += 1
         print(f"\n--- Iteration {iteration} ---")
         print(f"Current: {len(G.nodes())} nodes, {len(G.edges())} edges")
-        
 
-        sink_nodes = [node for node in G.nodes() 
+        # Log iteration state
+        dag_log.append({
+            'iteration': iteration,
+            'action': 'iteration_start',
+            'n_nodes': len(G.nodes()),
+            'n_edges': len(G.edges()),
+            'is_dag': nx.is_directed_acyclic_graph(G),
+            'details': f"Starting iteration {iteration}"
+        })
+
+
+        sink_nodes = [node for node in G.nodes()
                      if G.out_degree(node) == 0 and node not in target_columns]
-        
+
         if sink_nodes:
             print(f"Removing {len(sink_nodes)} sink nodes: {sink_nodes}")
+
+            # Log each sink node removal
+            for node in sink_nodes:
+                in_degree = G.in_degree(node)
+                dag_log.append({
+                    'iteration': iteration,
+                    'action': 'remove_sink_node',
+                    'node': node,
+                    'in_degree': in_degree,
+                    'out_degree': 0,
+                    'reason': f"Sink node (no outgoing edges) not in targets",
+                    'details': f"Removed {node}: {in_degree} incoming edges, 0 outgoing"
+                })
+
             G.remove_nodes_from(sink_nodes)
             removed_nodes.extend(sink_nodes)
             continue  
@@ -293,79 +330,304 @@ def create_principled_dag(df_edges, target_columns, confounders, output_folder="
 
         if nx.is_directed_acyclic_graph(G):
             print("Graph is now a DAG!")
+            dag_log.append({
+                'iteration': iteration,
+                'action': 'dag_achieved',
+                'n_nodes': len(G.nodes()),
+                'n_edges': len(G.edges()),
+                'details': "Successfully created DAG"
+            })
             break
-        
+
 
         try:
 
             cycle = nx.find_cycle(G, orientation='original')
             cycle_nodes = [u for u, v, d in cycle]
             cycle_edges = [(u, v) for u, v, d in cycle]
-            
-            print(f"Found cycle with {len(cycle_nodes)} nodes: {cycle_nodes}")
-            
 
-            best_edge_to_cut = find_best_cycle_edge_to_cut(
-                G, cycle_edges, target_columns, confounders, df_edges
+            print(f"Found cycle with {len(cycle_nodes)} nodes: {cycle_nodes}")
+
+            # Log cycle detection
+            dag_log.append({
+                'iteration': iteration,
+                'action': 'cycle_detected',
+                'cycle_length': len(cycle_nodes),
+                'cycle_nodes': ', '.join(cycle_nodes),
+                'cycle_edges': ', '.join([f"{u}->{v}" for u, v in cycle_edges]),
+                'details': f"Cycle with {len(cycle_nodes)} nodes: {' -> '.join(cycle_nodes)}"
+            })
+
+
+            best_edge_to_cut, cut_rationale = find_best_cycle_edge_to_cut_with_logging(
+                G, cycle_edges, target_columns, confounders, df_edges, iteration, dag_log
             )
-            
+
             if best_edge_to_cut:
                 u, v = best_edge_to_cut
                 edge_data = G[u][v]
                 score = edge_data.get('Score', 0)
                 time_effect = edge_data.get('timeToEffect', 0)
-                
+
                 G.remove_edge(u, v)
                 removed_edges.append({
-                    'from': u, 'to': v, 'score': score, 
-                    'time_effect': time_effect, 'iteration': iteration
+                    'from': u, 'to': v, 'score': score,
+                    'time_effect': time_effect, 'iteration': iteration,
+                    'rationale': cut_rationale
                 })
-                
+
                 print(f"Cut edge: {u} -> {v} (score: {score:.3f})")
+
+                # Log edge removal
+                dag_log.append({
+                    'iteration': iteration,
+                    'action': 'remove_edge',
+                    'edge_from': u,
+                    'edge_to': v,
+                    'score': score,
+                    'time_effect': time_effect,
+                    'reason': cut_rationale,
+                    'details': f"Removed edge {u}->{v} (score={score:.3f}): {cut_rationale}"
+                })
             else:
                 print("Could not find edge to cut")
+                dag_log.append({
+                    'iteration': iteration,
+                    'action': 'error',
+                    'details': "No suitable edge found to cut"
+                })
                 break
                 
         except nx.NetworkXNoCycle:
             print("No cycles found")
+            dag_log.append({
+                'iteration': iteration,
+                'action': 'no_cycle',
+                'details': "No cycles detected"
+            })
             break
         except Exception as e:
             print(f"Error: {e}")
+            dag_log.append({
+                'iteration': iteration,
+                'action': 'error',
+                'details': f"Exception: {str(e)}"
+            })
             break
-    
+
 
     isolated = [node for node in G.nodes() if G.degree(node) == 0]
     if isolated:
+        for node in isolated:
+            dag_log.append({
+                'iteration': iteration + 1,
+                'action': 'remove_isolated',
+                'node': node,
+                'details': f"Removed isolated node {node}"
+            })
         G.remove_nodes_from(isolated)
         removed_nodes.extend(isolated)
-    
+
     print(f"\n=== Final Result ===")
     print(f"Iterations: {iteration}")
     print(f"Removed {len(removed_edges)} edges, {len(removed_nodes)} nodes")
     print(f"Final: {len(G.nodes())} nodes, {len(G.edges())} edges")
     print(f"Is DAG: {nx.is_directed_acyclic_graph(G)}")
-    
+
 
     final_sinks = [n for n in G.nodes() if G.out_degree(n) == 0]
     target_sinks = [n for n in final_sinks if n in target_columns]
     other_sinks = [n for n in final_sinks if n not in target_columns]
-    
+
     print(f"Target sinks: {target_sinks}")
     if other_sinks:
         print(f"WARNING: Other sinks: {other_sinks}")
-    
 
+    # FIX 2.2: Save comprehensive logs
+    print("\n" + "="*70)
+    print("SAVING DAG CONSTRUCTION LOGS")
+    print("="*70)
+
+    # Save detailed log to CSV
+    if dag_log:
+        try:
+            df_log = pd.DataFrame(dag_log)
+            csv_path = output_folder + "dag_construction_log.csv"
+            df_log.to_csv(csv_path, index=False)
+            print(f"✓ Saved detailed log to: {csv_path}")
+        except Exception as e:
+            print(f"!  Warning: Could not save DAG log CSV: {e}")
+
+    # Save human-readable summary
+    try:
+        summary_path = output_folder + "dag_construction_summary.txt"
+        with open(summary_path, 'w') as f:
+            f.write("="*70 + "\n")
+            f.write("DAG CONSTRUCTION SUMMARY\n")
+            f.write("="*70 + "\n\n")
+            f.write(f"Initial state:\n")
+            f.write(f"  - Edges: {len(df_edges)}\n")
+            f.write(f"  - Target variables: {', '.join(target_columns)}\n")
+            f.write(f"  - Confounders: {', '.join(confounders) if confounders else 'None'}\n\n")
+
+            f.write(f"Process:\n")
+            f.write(f"  - Iterations: {iteration}\n")
+            f.write(f"  - Nodes removed: {len(removed_nodes)} ({', '.join(removed_nodes) if removed_nodes else 'None'})\n")
+            f.write(f"  - Edges removed: {len(removed_edges)}\n\n")
+
+            f.write(f"Final state:\n")
+            f.write(f"  - Nodes: {len(G.nodes())}\n")
+            f.write(f"  - Edges: {len(G.edges())}\n")
+            f.write(f"  - Is DAG: {nx.is_directed_acyclic_graph(G)}\n")
+            f.write(f"  - Target sinks: {', '.join(target_sinks)}\n")
+            if other_sinks:
+                f.write(f"  - WARNING: Other sinks: {', '.join(other_sinks)}\n")
+            f.write("\n")
+
+            if removed_edges:
+                f.write("="*70 + "\n")
+                f.write("REMOVED EDGES DETAILS\n")
+                f.write("="*70 + "\n\n")
+                for idx, edge in enumerate(removed_edges, 1):
+                    f.write(f"{idx}. {edge['from']} -> {edge['to']}\n")
+                    f.write(f"   - Iteration: {edge['iteration']}\n")
+                    f.write(f"   - Score: {edge['score']:.3f}\n")
+                    f.write(f"   - Time to effect: {edge.get('time_effect', 'N/A')}\n")
+                    if 'rationale' in edge:
+                        f.write(f"   - Rationale: {edge['rationale']}\n")
+                    f.write("\n")
+
+            f.write("="*70 + "\n")
+            f.write("ITERATION-BY-ITERATION LOG\n")
+            f.write("="*70 + "\n\n")
+            for log_entry in dag_log:
+                f.write(f"[Iteration {log_entry.get('iteration', 'N/A')}] {log_entry.get('action', 'unknown')}\n")
+                f.write(f"  {log_entry.get('details', '')}\n\n")
+
+        print(f"✓ Saved human-readable summary to: {summary_path}")
+    except Exception as e:
+        print(f"!  Warning: Could not save DAG summary: {e}")
+
+    # Save removed edges (enhanced version)
     if removed_edges:
         removed_df = pd.DataFrame(removed_edges)
         try:
-            removed_df.to_csv(output_folder + "removed_edges_analysis.csv", index=False)
-        except:
-            pass
-    
+            removed_path = output_folder + "removed_edges_detailed.csv"
+            removed_df.to_csv(removed_path, index=False)
+            print(f"✓ Saved removed edges to: {removed_path}")
+        except Exception as e:
+            print(f"!  Warning: Could not save removed edges CSV: {e}")
+
+    print("="*70)
+
     return G, removed_edges
+
+def find_best_cycle_edge_to_cut_with_logging(G, cycle_edges, target_columns, confounders, df_edges, iteration, dag_log):
+    """
+    FIX 2.2: Enhanced version with detailed logging of decision criteria
+
+    Find best edge to cut in cycle following the CORRECTED logic:
+    1. Never cut edges TO targets
+    2. Cut far from target (maximize distance to target)
+    3. Cut close to confounders (minimize distance from confounders)
+    4. Use CCM score as tiebreaker (cut lower scores)
+
+    Returns:
+        best_edge (tuple): (u, v) edge to cut
+        rationale (str): Human-readable explanation of why this edge was chosen
+    """
+    if not cycle_edges:
+        return None, "No edges in cycle"
+
+
+    safe_edges = [(u, v) for u, v in cycle_edges if v not in target_columns]
+    if not safe_edges:
+        print("WARNING: All cycle edges go to targets!")
+        safe_edges = cycle_edges
+        dag_log.append({
+            'iteration': iteration,
+            'action': 'warning',
+            'details': "All cycle edges go to targets - will cut anyway"
+        })
+
+    print(f"Safe edges to consider: {safe_edges}")
+
+    best_edge = None
+    best_distance_to_target = -1
+    best_distance_from_confounder = float('inf')
+    best_score = 1.0
+    best_rationale = ""
+
+    # Log each candidate edge evaluation
+    for u, v in safe_edges:
+        edge_data = G[u][v]
+        score = edge_data.get('Score', 0)
+
+
+        dist_from_confounder = get_min_distance_from_confounders(G, u, confounders)
+        dist_to_target = get_min_distance_to_targets(G, v, target_columns)
+
+        print(f"Edge {u}->{v}: score={score:.3f}, dist_from_conf={dist_from_confounder}, dist_to_targ={dist_to_target}")
+
+        # Log evaluation
+        dag_log.append({
+            'iteration': iteration,
+            'action': 'evaluate_edge',
+            'edge_from': u,
+            'edge_to': v,
+            'score': score,
+            'dist_to_target': dist_to_target if dist_to_target != float('inf') else 'inf',
+            'dist_from_confounder': dist_from_confounder if dist_from_confounder != float('inf') else 'inf',
+            'details': f"Evaluating {u}->{v}: score={score:.3f}, dist_to_target={dist_to_target}, dist_from_conf={dist_from_confounder}"
+        })
+
+
+        should_select = False
+        reason = ""
+
+
+        if dist_to_target > best_distance_to_target:
+            should_select = True
+            reason = f"farther from target (dist={dist_to_target} vs {best_distance_to_target})"
+        elif dist_to_target == best_distance_to_target and dist_to_target > 0:
+
+            if confounders and dist_from_confounder < best_distance_from_confounder:
+                should_select = True
+                reason = f"same target distance, closer to confounder (dist={dist_from_confounder} vs {best_distance_from_confounder})"
+            elif confounders and dist_from_confounder == best_distance_from_confounder:
+
+                if score < best_score:
+                    should_select = True
+                    reason = f"same distances, lower CCM score ({score:.3f} vs {best_score:.3f})"
+            elif not confounders:
+
+                if score < best_score:
+                    should_select = True
+                    reason = f"same target distance, lower CCM score ({score:.3f} vs {best_score:.3f})"
+
+        if should_select:
+            best_edge = (u, v)
+            best_distance_to_target = dist_to_target
+            best_distance_from_confounder = dist_from_confounder
+            best_score = score
+            best_rationale = reason
+            print(f"  -> NEW BEST: {reason}")
+
+    if best_edge:
+        print(f"Selected edge to cut: {best_edge[0]} -> {best_edge[1]}")
+        final_rationale = (f"{best_rationale}; final metrics: "
+                          f"dist_to_target={best_distance_to_target}, "
+                          f"dist_from_conf={best_distance_from_confounder}, "
+                          f"score={best_score:.3f}")
+        return best_edge, final_rationale
+    else:
+        return None, "No suitable edge found"
+
 
 def find_best_cycle_edge_to_cut(G, cycle_edges, target_columns, confounders, df_edges):
     """
+    Original version (kept for compatibility)
+
     Find best edge to cut in cycle following the CORRECTED logic:
     1. Never cut edges TO targets
     2. Cut far from target (maximize distance to target)
@@ -374,34 +636,34 @@ def find_best_cycle_edge_to_cut(G, cycle_edges, target_columns, confounders, df_
     """
     if not cycle_edges:
         return None
-    
+
 
     safe_edges = [(u, v) for u, v in cycle_edges if v not in target_columns]
     if not safe_edges:
         print("WARNING: All cycle edges go to targets!")
-        safe_edges = cycle_edges  
-    
+        safe_edges = cycle_edges
+
     print(f"Safe edges to consider: {safe_edges}")
-    
+
     best_edge = None
     best_distance_to_target = -1
-    best_distance_from_confounder = float('inf') 
-    best_score = 1.0  
-    
+    best_distance_from_confounder = float('inf')
+    best_score = 1.0
+
     for u, v in safe_edges:
         edge_data = G[u][v]
         score = edge_data.get('Score', 0)
-        
+
 
         dist_from_confounder = get_min_distance_from_confounders(G, u, confounders)  # Changed to min distance
         dist_to_target = get_min_distance_to_targets(G, v, target_columns)
-        
+
         print(f"Edge {u}->{v}: score={score:.3f}, dist_from_conf={dist_from_confounder}, dist_to_targ={dist_to_target}")
-        
+
 
         should_select = False
         reason = ""
-        
+
 
         if dist_to_target > best_distance_to_target:
             should_select = True
@@ -421,17 +683,17 @@ def find_best_cycle_edge_to_cut(G, cycle_edges, target_columns, confounders, df_
                 if score < best_score:
                     should_select = True
                     reason = f"same distance to target, lower score ({score:.3f})"
-        
+
         if should_select:
             best_edge = (u, v)
             best_distance_to_target = dist_to_target
             best_distance_from_confounder = dist_from_confounder
             best_score = score
             print(f"  -> NEW BEST: {reason}")
-    
+
     if best_edge:
         print(f"Selected edge to cut: {best_edge[0]} -> {best_edge[1]}")
-    
+
     return best_edge
 
 def get_min_distance_from_confounders(G, node, confounders):
@@ -592,6 +854,8 @@ parser.add_argument('--probability_cutoff', type=float,
                     default=0.5, help='Probability cutoff for edge inclusion')
 parser.add_argument('--bidirectional_interaction', type=str, default='higher',
                     help='For DAG keep higher or earlier effect edge when bidirectional')
+parser.add_argument('--significance_filter_mode', type=str, default='both',
+                    help='Significance filtration mode: fdr_only, surrogate_only, or both')
 
 
 args = parser.parse_args()
@@ -710,6 +974,41 @@ df_CausalFeatures2_untouched = df_CausalFeatures2.copy()
 
 df_CausalFeatures2 = df_CausalFeatures2[~df_CausalFeatures2['x2'].isin(confounders)]
 df_CausalFeatures2 = df_CausalFeatures2[~df_CausalFeatures2['x1'].isin(targetlist)]
+
+# Apply significance filtration based on mode
+significance_filter_mode = str(args.significance_filter_mode)
+print(f"\nApplying significance filtration: {significance_filter_mode}", flush=True)
+print(f"Edges before filtration: {len(df_CausalFeatures2)}", flush=True)
+
+if significance_filter_mode == 'fdr_only':
+    # Keep only edges with significant_fdr == True
+    if 'significant_fdr' in df_CausalFeatures2.columns:
+        df_CausalFeatures2 = df_CausalFeatures2[df_CausalFeatures2['significant_fdr'] == True]
+        print(f"  Using FDR only: kept {len(df_CausalFeatures2)} edges with significant_fdr=True", flush=True)
+    else:
+        print(f"  WARNING: significant_fdr column not found, skipping FDR filtration", flush=True)
+
+elif significance_filter_mode == 'surrogate_only':
+    # Keep only edges where Score >= Score_quantile
+    if 'Score' in df_CausalFeatures2.columns and 'Score_quantile' in df_CausalFeatures2.columns:
+        df_CausalFeatures2 = df_CausalFeatures2[df_CausalFeatures2['Score'] >= df_CausalFeatures2['Score_quantile']]
+        print(f"  Using surrogate quantile only: kept {len(df_CausalFeatures2)} edges with Score >= quantile", flush=True)
+    else:
+        print(f"  WARNING: Score or Score_quantile column not found, skipping surrogate filtration", flush=True)
+
+elif significance_filter_mode == 'both':
+    # Keep edges that pass BOTH tests
+    if 'significant_fdr' in df_CausalFeatures2.columns:
+        df_CausalFeatures2 = df_CausalFeatures2[df_CausalFeatures2['significant_fdr'] == True]
+        print(f"  After FDR filter: {len(df_CausalFeatures2)} edges", flush=True)
+
+    if 'Score' in df_CausalFeatures2.columns and 'Score_quantile' in df_CausalFeatures2.columns:
+        df_CausalFeatures2 = df_CausalFeatures2[df_CausalFeatures2['Score'] >= df_CausalFeatures2['Score_quantile']]
+        print(f"  After surrogate quantile filter: {len(df_CausalFeatures2)} edges", flush=True)
+
+    print(f"  Using both filters: kept {len(df_CausalFeatures2)} edges total", flush=True)
+
+print(f"Edges after filtration: {len(df_CausalFeatures2)}\n", flush=True)
 
 for i in df_CausalFeatures2.columns:
     if "Unnamed" in i:
@@ -991,42 +1290,79 @@ for edge in G_dag_tmp.edges():
 # Create delayed variables and add edges to enhanced DAG
 delayed_variables = {}
 edges_to_remove = set()
+delayed_edges_to_add = []
 
-# First pass: identify edges that will be replaced by delayed variables
-for _, row in df_CausalFeatures2.iterrows():
-    x1, x2 = row['x1'], row['x2'] 
+# First pass: identify ALL edges with delay > 1 and collect delayed edges to create
+# Use df_CausalFeatures2_dag (filtered version) to respect DAG filtering rules
+print("\n=== IDENTIFYING DELAYED VARIABLES ===")
+for _, row in df_CausalFeatures2_dag.iterrows():
+    x1, x2 = row['x1'], row['x2']
     delay = row.get('timeToEffect', 0)
-    
-    if delay > 1 and x1 in G_dag_enhanced.nodes() and x2 in G_dag_enhanced.nodes():  # Only for delay > 1
-        # Mark direct edge for removal if it exists
-        if G_dag_enhanced.has_edge(x1, x2):
-            edges_to_remove.add((x1, x2))
 
-# Remove direct edges that will be replaced
+    # Process edges with delay > 1 where source node exists in DAG
+    if delay > 1 and x1 in G_dag_enhanced.nodes():
+        # Check if direct edge exists or if target node was removed
+        edge_exists = G_dag_enhanced.has_edge(x1, x2)
+        target_exists = x2 in G_dag_enhanced.nodes()
+
+        if edge_exists:
+            # Scenario 1: Direct edge exists - replace with delayed variable
+            edges_to_remove.add((x1, x2))
+            delayed_var = f"{x1}_shift_t-{int(delay)}"
+            delayed_edges_to_add.append((delayed_var, x2, x1, int(delay)))
+            delayed_variables[delayed_var] = (x1, int(delay))
+            print(f"Will remove direct edge and create delayed: {x1} -> {x2} => {delayed_var} -> {x2} (delay={delay})")
+        elif not target_exists:
+            # Scenario 3: Target node removed (likely all edges to it are delayed) - recreate with delayed variable
+            delayed_var = f"{x1}_shift_t-{int(delay)}"
+            delayed_edges_to_add.append((delayed_var, x2, x1, int(delay)))
+            delayed_variables[delayed_var] = (x1, int(delay))
+            print(f"Target node absent, will create delayed: {delayed_var} -> {x2} (delay={delay})")
+        else:
+            # Scenario 2: Both nodes exist but edge was removed during cycle-breaking - respect that decision
+            print(f"Skipping {x1} -> {x2} (delay={delay}): edge was removed during DAG construction, not recreating")
+
+# Second pass: Remove direct edges that will be replaced
+print("\n=== REMOVING DIRECT EDGES ===")
 for x1, x2 in edges_to_remove:
     if G_dag_enhanced.has_edge(x1, x2):
         G_dag_enhanced.remove_edge(x1, x2)
-        print(f"Removed direct edge: {x1} -> {x2} (will be replaced by delayed variable)")
+        print(f"Removed direct edge: {x1} -> {x2}")
 
-# Second pass: add delayed variables
-for _, row in df_CausalFeatures2.iterrows():
-    x1, x2 = row['x1'], row['x2'] 
-    delay = row.get('timeToEffect', 0)
-    
-    if delay > 1 and x1 in G_dag_enhanced.nodes() and x2 in G_dag_enhanced.nodes():  # Only for delay > 1
-        # Create delayed variable name
-        delayed_var = f"{x1}_shift_t-{int(delay)}"
-        delayed_variables[delayed_var] = (x1, int(delay))
-        
+# Third pass: Add delayed variables and their edges
+# Only add if target node (x2) has outgoing edges or is a target variable
+print("\n=== ADDING DELAYED VARIABLES ===")
+added_count = 0
+skipped_count = 0
+for delayed_var, x2, x1, delay in delayed_edges_to_add:
+    # Check if x2 has a path forward (has outgoing edges OR is a target)
+    x2_exists = x2 in G_dag_enhanced.nodes()
+    x2_has_outgoing = x2_exists and G_dag_enhanced.out_degree(x2) > 0
+    x2_is_target = x2 in targetlist
+
+    if x2_has_outgoing or x2_is_target:
+        # Ensure x2 (target node) exists
+        if not x2_exists:
+            G_dag_enhanced.add_node(x2)
+            print(f"Re-added node {x2} (needed as target for delayed variable)")
+
         # Add delayed variable as new node
-        G_dag_enhanced.add_node(delayed_var)
-        
+        if delayed_var not in G_dag_enhanced.nodes():
+            G_dag_enhanced.add_node(delayed_var)
+
         # Add edge from delayed variable to target
         G_dag_enhanced.add_edge(delayed_var, x2)
-        
-        print(f"Added delayed variable: {delayed_var} -> {x2} (delay: {delay})")
+        print(f"✓ Added delayed variable: {delayed_var} -> {x2} (delay={delay})")
+        added_count += 1
+    else:
+        # Skip: x2 would become a sink node with no path to targets
+        print(f"⊗ Skipped {delayed_var} -> {x2}: target node has no outgoing edges and is not a target variable")
+        # Don't add to delayed_variables dict since we're not creating it
+        if delayed_var in delayed_variables:
+            del delayed_variables[delayed_var]
+        skipped_count += 1
 
-print(f"Replaced {len(edges_to_remove)} direct edges with delayed variables")
+print(f"\n✓ Replaced {len(edges_to_remove)} direct edges with {added_count} delayed variables ({skipped_count} skipped as sink nodes)")
 
 # Update G_dag_tmp to use the enhanced DAG for all downstream processing
 G_dag_tmp = G_dag_enhanced.copy()
@@ -1039,7 +1375,7 @@ delayed_vars_to_remove = []
 for delayed_var, (original_var, delay) in delayed_variables.items():
     if original_var not in available_original_vars:
         delayed_vars_to_remove.append(delayed_var)
-        print(f"⚠️  Removing {delayed_var} from DAG - original variable {original_var} not in data")
+        print(f"!  Removing {delayed_var} from DAG - original variable {original_var} not in data")
 
 # Remove delayed variables that can't be created
 for delayed_var in delayed_vars_to_remove:
@@ -1048,11 +1384,34 @@ for delayed_var in delayed_vars_to_remove:
         G_dag_tmp.remove_node(delayed_var)
         # Remove from delayed_variables dict
         del delayed_variables[delayed_var]
-        print(f"❌ Removed {delayed_var} from DAG and delayed_variables")
+        print(f"X Removed {delayed_var} from DAG and delayed_variables")
+
+# Remove sink nodes (nodes with no outgoing edges) except targets
+print("\n=== REMOVING SINK NODES ===")
+iteration = 0
+total_removed = 0
+while True:
+    iteration += 1
+    sink_nodes = [node for node in G_dag_tmp.nodes()
+                  if G_dag_tmp.out_degree(node) == 0 and node not in targetlist]
+
+    if not sink_nodes:
+        print(f"✓ No more sinks to remove (iteration {iteration})")
+        break
+
+    print(f"Iteration {iteration}: Removing {len(sink_nodes)} sink nodes: {sink_nodes}")
+    for sink_node in sink_nodes:
+        G_dag_tmp.remove_node(sink_node)
+        # Also remove from delayed_variables if it's a delayed variable
+        if sink_node in delayed_variables:
+            del delayed_variables[sink_node]
+        total_removed += 1
+
+print(f"V Removed {total_removed} sink nodes")
 
 edges = G_dag_tmp.edges
 DAG = bn.make_DAG(list(edges))
-print(f"✅ Filtered DAG: {len(G_dag_tmp.nodes())} nodes, {len(G_dag_tmp.edges())} edges")
+print(f"V Filtered DAG: {len(G_dag_tmp.nodes())} nodes, {len(G_dag_tmp.edges())} edges")
 
 print(f"Enhanced DAG: {len(G_dag_tmp.nodes())} nodes, {len(G_dag_tmp.edges())} edges")
 print(f"Delayed variables: {list(delayed_variables.keys())}")
@@ -1125,11 +1484,11 @@ for i in targetlist:
         if original_var in df_tmp.columns:
             df_tmp[delayed_var] = df_tmp[original_var].shift(int(delay))
             created_delayed_vars.append(delayed_var)
-            print(f"✅ Created delayed column: {delayed_var} from {original_var}")
+            print(f"V Created delayed column: {delayed_var} from {original_var}")
         else:
-            print(f"⚠️  MISSING original variable {original_var} - cannot create {delayed_var}")
+            print(f"!  MISSING original variable {original_var} - cannot create {delayed_var}")
     
-    print(f"✅ Successfully created {len(created_delayed_vars)} delayed variables: {created_delayed_vars}")
+    print(f"V Successfully created {len(created_delayed_vars)} delayed variables: {created_delayed_vars}")
     
     # Apply original shifting logic only to non-delayed variables
     original_cols = [col for col in cols if col not in [dv[0] for dv in delayed_variables.values()]]
@@ -1153,103 +1512,313 @@ for i in targetlist:
     # Check for missing delayed variables
     missing_delayed = [var for var in expected_delayed_vars if var not in df_tmp.columns]
     if missing_delayed:
-        print(f"⚠️  Target {i}: Missing delayed columns: {missing_delayed}")
+        print(f"!  Target {i}: Missing delayed columns: {missing_delayed}")
 
 
 dict_acc = {}
 
+# Create debug log file for BN training
+bn_debug_file = output_folder + "bn_training_debug.txt"
+with open(bn_debug_file, 'w') as f:
+    f.write("="*60 + "\n")
+    f.write("BN TRAINING DEBUG LOG\n")
+    f.write("="*60 + "\n\n")
+
+print("\n" + "="*60)
+print("STARTING BN TRAINING LOOP")
+print("="*60)
 for t in targetlist:
-   
+    print(f"\n>>> Processing target: {t}")
+    print(f">>> dict_df_cuts[{t}] columns: {list(dict_df_cuts[t].columns)}")
+    print(f">>> Shifted columns in data: {[c for c in dict_df_cuts[t].columns if '_shift' in c]}")
+
     dag_nodes = list(DAG['adjmat'].columns)
- 
-    
-    available_cols = set(dict_df_cuts[t].columns)
+    print(f">>> DAG nodes (from DAG['adjmat']): {dag_nodes}")
+    print(f">>> Shifted nodes in DAG: {[n for n in dag_nodes if '_shift' in n]}")
+
+    # Write to debug file
+    with open(bn_debug_file, 'a') as f:
+        f.write(f"\n{'='*60}\n")
+        f.write(f"Processing target: {t}\n")
+        f.write(f"{'='*60}\n")
+        f.write(f"dict_df_cuts[{t}] columns: {list(dict_df_cuts[t].columns)}\n")
+        f.write(f"Shifted columns in data: {[c for c in dict_df_cuts[t].columns if '_shift' in c]}\n")
+        f.write(f"DAG nodes (from DAG['adjmat']): {dag_nodes}\n")
+        f.write(f"Shifted nodes in DAG: {[n for n in dag_nodes if '_shift' in n]}\n")
+
+    # Create a copy of data for BN training
+    bn_data = dict_df_cuts[t].copy()
+
+    # Create any missing shifted columns needed for the DAG
+    dag_nodes_with_shift = [n for n in dag_nodes if '_shift_t-' in n]
+    print(f"\n=== BN TRAINING DEBUG for target {t} ===")
+    print(f"DAG nodes with shift: {dag_nodes_with_shift}")
+
+    for node in dag_nodes:
+        if node not in bn_data.columns:
+            if '_shift_t-' in node:
+                # Parse original variable and delay from node name
+                parts = node.split('_shift_t-')
+                original_var = parts[0]
+                delay = int(parts[1])
+                if original_var in bn_data.columns:
+                    bn_data[node] = bn_data[original_var].shift(delay)
+                    print(f"V Created BN data column: {node} from {original_var} (delay={delay})")
+                else:
+                    print(f"! Cannot create {node}: original {original_var} not in data")
+
+    # Drop NaN rows created by shifting
+    bn_data = bn_data.dropna()
+    print(f"BN data after creating shifts: {len(bn_data)} rows, {len(bn_data.columns)} columns")
+
+    # Update dict_df_cuts with the new data that includes shifted columns
+    dict_df_cuts[t] = bn_data
+
+    available_cols = set(bn_data.columns)
     required_cols = set(dag_nodes)
     missing_cols = required_cols - available_cols
     extra_cols = available_cols - required_cols
-    
-    print(f"\n=== BN TRAINING DEBUG for target {t} ===")
+
     print(f"DAG nodes required: {sorted(dag_nodes)}")
-    print(f"Data columns available: {sorted(dict_df_cuts[t].columns)}")
+    print(f"Data columns available: {sorted(bn_data.columns)}")
     print(f"Missing columns: {sorted(missing_cols)}")
     print(f"Extra columns: {sorted(extra_cols)}")
-    
-    available_dag_cols = [col for col in dag_nodes if col in dict_df_cuts[t].columns]
+
+    available_dag_cols = [col for col in dag_nodes if col in bn_data.columns]
     if len(available_dag_cols) != len(dag_nodes):
-        print(f"⚠️  WARNING: Only {len(available_dag_cols)}/{len(dag_nodes)} DAG columns available in data")
+        print(f"!  WARNING: Only {len(available_dag_cols)}/{len(dag_nodes)} DAG columns available in data")
         print(f"Available DAG columns: {available_dag_cols}")
         print("SKIPPING BN training due to missing columns")
         continue  # Skip this target if columns are missing
     else:
-        print(f"✅ All {len(dag_nodes)} DAG columns available - proceeding with BN training")
-    
+        print(f"V All {len(dag_nodes)} DAG columns available - proceeding with BN training")
 
-    df_cut = dict_df_cuts[t][available_dag_cols].sample(frac=float(bn_training_fraction), random_state=42)
-    df_cut_test = dict_df_cuts[t][available_dag_cols].drop(df_cut.index)
+    # Cross-validation implementation to prevent overfitting
+    # Check minimum samples per class for stratification
+    min_samples_per_class = dict_df_cuts[t][t].value_counts().min()
+    n_folds = min(5, min_samples_per_class)
 
-
-    column = t
-    df_cut_test = df_cut_test.groupby(column).sample(n=df_cut_test[column].value_counts().min(), random_state=42)
-
+    # Get all edges from DAG
     edges = list(G_dag_tmp.edges)
-    
-    DAG = bn.make_DAG(list(edges))
+    print(f"DEBUG: Total edges in G_dag_tmp: {len(edges)}")
 
-    nodes = list(DAG['adjmat'].columns)
-    
+    if n_folds < 2:
+        print(f"!  WARNING: Only {min_samples_per_class} samples in smallest class for {t}")
+        print("   Using holdout validation instead of cross-validation")
 
-    DAG_global = bn.parameter_learning.fit(DAG, df_cut[nodes], methodtype='bayes')
-    dict_df_cuts[t+"_dag_global"] = DAG_global
+        # Fallback to simple train/test split
+        df_cut = dict_df_cuts[t][available_dag_cols].sample(frac=float(bn_training_fraction), random_state=42)
+        df_cut_test = dict_df_cuts[t][available_dag_cols].drop(df_cut.index)
 
-    DAG_global_learned = bn.structure_learning.fit(df_cut[nodes])
-    dict_df_cuts[t+"_dag_global_learned"] = DAG_global_learned
+        column = t
+        df_cut_test = df_cut_test.groupby(column).sample(n=df_cut_test[column].value_counts().min(), random_state=42)
 
+        DAG = bn.make_DAG(list(edges))
+        nodes = list(DAG['adjmat'].columns)
+        print(f"DEBUG: BN nodes after make_DAG: {nodes}")
 
-    dict_test = {}
-    l = [list(i) for i in DAG_global['model_edges']]
-    model_nodes = [item for sublist in l for item in sublist]
-    model_nodes = list(set(model_nodes))
-   
-    
+        print(f"DEBUG: Training BN with columns: {list(df_cut[nodes].columns)}")
+        print(f"DEBUG: Shifted columns in training data: {[c for c in df_cut[nodes].columns if '_shift' in c]}")
+        print(f"DEBUG: Training data shape: {df_cut[nodes].shape}")
 
-    available_test_nodes = [node for node in model_nodes if node in df_cut_test.columns]
+        # Write to debug file
+        with open(bn_debug_file, 'a') as f:
+            f.write(f"\n--- HOLDOUT TRAINING ---\n")
+            f.write(f"Training BN with columns: {list(df_cut[nodes].columns)}\n")
+            f.write(f"Shifted columns in training data: {[c for c in df_cut[nodes].columns if '_shift' in c]}\n")
+            f.write(f"Training data shape: {df_cut[nodes].shape}\n")
 
-    cases = df_cut_test[available_test_nodes].values.tolist()
-    keys = available_test_nodes
+        DAG_global = bn.parameter_learning.fit(DAG, df_cut[nodes], methodtype='bayes')
+        dict_df_cuts[t+"_dag_global"] = DAG_global
 
-    all_p = []
-    for i, vali in enumerate(cases):
+        # Debug: Check what edges were learned
+        learned_edges = list(DAG_global['model_edges'])
+        learned_edge_nodes = [item for sublist in learned_edges for item in sublist]
+        learned_edge_nodes = list(set(learned_edge_nodes))
+        print(f"DEBUG: Learned edges: {learned_edges}")
+        print(f"DEBUG: Shifted nodes in learned edges: {[n for n in learned_edge_nodes if '_shift' in n]}")
+
+        # Write to debug file
+        with open(bn_debug_file, 'a') as f:
+            f.write(f"Learned edges: {learned_edges}\n")
+            f.write(f"Shifted nodes in learned edges: {[n for n in learned_edge_nodes if '_shift' in n]}\n")
+
+        DAG_global_learned = bn.structure_learning.fit(df_cut[nodes])
+        dict_df_cuts[t+"_dag_global_learned"] = DAG_global_learned
+
         dict_test = {}
-        for j, valj in enumerate(keys):
-            dict_test[valj] = str(vali[j])
+        l = [list(i) for i in DAG_global['model_edges']]
+        model_nodes = [item for sublist in l for item in sublist]
+        model_nodes = list(set(model_nodes))
 
-        for j in targetlist:
+        available_test_nodes = [node for node in model_nodes if node in df_cut_test.columns]
+        cases = df_cut_test[available_test_nodes].values.tolist()
+        keys = available_test_nodes
+
+        all_p = []
+        for i, vali in enumerate(cases):
+            dict_test = {}
+            for j, valj in enumerate(keys):
+                dict_test[valj] = str(vali[j])
+
+            for j in targetlist:
+                try:
+                    del dict_test[j]
+                except:
+                    pass
             try:
-                del dict_test[j]
+                q1 = bn.inference.fit(DAG_global, variables=[t], evidence=dict_test)
+                all_p.append(q1.df.p[1])
             except:
-                print()
-        try:
-            q1 = bn.inference.fit(DAG_global, variables=[t], evidence=dict_test)
-            all_p.append(q1.df.p[1])
-        except:    
-            all_p.append(0.5)
+                all_p.append(0.5)
 
-    df_test = pd.DataFrame()
-    df_test['Observed'] = df_cut_test[t].values.tolist()
-    df_test['Predicted'] = all_p
-    df_test = df_test.astype(float)
+        df_test = pd.DataFrame()
+        df_test['Observed'] = df_cut_test[t].values.tolist()
+        df_test['Predicted'] = all_p
+        df_test = df_test.astype(float)
 
-    plt.figure(figsize=(6, 10))  # Taller format for dashboard
+        def roundProb(p):
+            if p >= probability_cutoff:
+                return 1
+            else:
+                return 0
+
+        df_test['p_binary'] = df_test['Predicted'].apply(roundProb)
+        acc = accuracy_score(df_test['Observed'].values, df_test['p_binary'].values)
+
+        print(f"{t} holdout accuracy = {acc:.3f}")
+        dict_acc[t] = {'method': 'holdout', 'mean': acc, 'std': None, 'ci_lower': None, 'ci_upper': None}
+
+        # Store the final DAG_global for later use (trained on all training data)
+        # This is kept for compatibility with downstream code
+
+    else:
+        # Cross-validation implementation
+        print(f"✓ Running {n_folds}-fold stratified cross-validation for {t}")
+
+        skf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
+        fold_accuracies = []
+        all_predictions = []
+        all_true_labels = []
+        all_test_indices = []
+
+        # We'll train a final model on all data after CV for downstream use
+        df_all_data = dict_df_cuts[t][available_dag_cols]
+
+        for fold_idx, (train_idx, test_idx) in enumerate(skf.split(df_all_data, df_all_data[t])):
+            df_train = df_all_data.iloc[train_idx]
+            df_test_fold = df_all_data.iloc[test_idx]
+
+            # Train BN on this fold
+            DAG_fold = bn.make_DAG(list(edges))
+            nodes_fold = list(DAG_fold['adjmat'].columns)
+            DAG_fold = bn.parameter_learning.fit(DAG_fold, df_train[nodes_fold], methodtype='bayes')
+
+            # Get model nodes for prediction
+            l_fold = [list(i) for i in DAG_fold['model_edges']]
+            model_nodes_fold = [item for sublist in l_fold for item in sublist]
+            model_nodes_fold = list(set(model_nodes_fold))
+
+            available_test_nodes_fold = [node for node in model_nodes_fold if node in df_test_fold.columns]
+
+            # Predict on test fold
+            fold_preds = []
+            for _, row in df_test_fold.iterrows():
+                evidence = {col: str(int(row[col])) for col in available_test_nodes_fold if col != t}
+                try:
+                    q = bn.inference.fit(DAG_fold, variables=[t], evidence=evidence)
+                    pred_prob = q.df.p[1] if len(q.df) > 1 else 0.5
+                except:
+                    pred_prob = 0.5
+                fold_preds.append(pred_prob)
+
+            # Calculate fold accuracy
+            pred_binary = [1 if p >= probability_cutoff else 0 for p in fold_preds]
+            true_labels = df_test_fold[t].astype(int).tolist()
+            fold_acc = sum([1 for p, t_label in zip(pred_binary, true_labels) if p == t_label]) / len(true_labels)
+            fold_accuracies.append(fold_acc)
+
+            all_predictions.extend(fold_preds)
+            all_true_labels.extend(true_labels)
+            all_test_indices.extend(test_idx)
+
+            print(f"  Fold {fold_idx+1}/{n_folds}: accuracy = {fold_acc:.3f}")
+
+        # Calculate CV statistics
+        mean_acc = np.mean(fold_accuracies)
+        std_acc = np.std(fold_accuracies)
+        ci_lower = mean_acc - 1.96 * std_acc / np.sqrt(len(fold_accuracies))
+        ci_upper = mean_acc + 1.96 * std_acc / np.sqrt(len(fold_accuracies))
+
+        print(f"\n✓ {t} CV accuracy = {mean_acc:.3f} ± {std_acc:.3f}")
+        print(f"  95% CI: [{ci_lower:.3f}, {ci_upper:.3f}]")
+
+        dict_acc[t] = {
+            'method': 'cross_validation',
+            'mean': mean_acc,
+            'std': std_acc,
+            'ci_lower': ci_lower,
+            'ci_upper': ci_upper,
+            'fold_accuracies': fold_accuracies
+        }
+
+        # Train final model on ALL data for downstream use and visualization
+        DAG = bn.make_DAG(list(edges))
+        nodes = list(DAG['adjmat'].columns)
+
+        print(f"DEBUG CV: Training BN with columns: {list(df_all_data[nodes].columns)}")
+        print(f"DEBUG CV: Shifted columns in training data: {[c for c in df_all_data[nodes].columns if '_shift' in c]}")
+        print(f"DEBUG CV: Training data shape: {df_all_data[nodes].shape}")
+
+        # Write to debug file
+        with open(bn_debug_file, 'a') as f:
+            f.write(f"\n--- CV TRAINING ---\n")
+            f.write(f"Training BN with columns: {list(df_all_data[nodes].columns)}\n")
+            f.write(f"Shifted columns in training data: {[c for c in df_all_data[nodes].columns if '_shift' in c]}\n")
+            f.write(f"Training data shape: {df_all_data[nodes].shape}\n")
+
+        DAG_global = bn.parameter_learning.fit(DAG, df_all_data[nodes], methodtype='bayes')
+        dict_df_cuts[t+"_dag_global"] = DAG_global
+
+        # Debug: Check what edges were learned
+        learned_edges = list(DAG_global['model_edges'])
+        learned_edge_nodes = [item for sublist in learned_edges for item in sublist]
+        learned_edge_nodes = list(set(learned_edge_nodes))
+        print(f"DEBUG CV: Learned edges: {learned_edges}")
+        print(f"DEBUG CV: Shifted nodes in learned edges: {[n for n in learned_edge_nodes if '_shift' in n]}")
+
+        # Write to debug file
+        with open(bn_debug_file, 'a') as f:
+            f.write(f"Learned edges: {learned_edges}\n")
+            f.write(f"Shifted nodes in learned edges: {[n for n in learned_edge_nodes if '_shift' in n]}\n")
+
+        DAG_global_learned = bn.structure_learning.fit(df_all_data[nodes])
+        dict_df_cuts[t+"_dag_global_learned"] = DAG_global_learned
+
+        # Create df_test using CV predictions for visualization
+        df_test = pd.DataFrame()
+        df_test['Observed'] = [all_true_labels[all_test_indices.index(i)] for i in sorted(all_test_indices)]
+        df_test['Predicted'] = [all_predictions[all_test_indices.index(i)] for i in sorted(all_test_indices)]
+        df_test = df_test.astype(float)
+
+        def roundProb(p):
+            if p >= probability_cutoff:
+                return 1
+            else:
+                return 0
+
+        df_test['p_binary'] = df_test['Predicted'].apply(roundProb)
+
+    # Common plotting code for both holdout and CV
+    plt.figure(figsize=(6, 10))
     ax = df_test.reset_index().plot(kind="scatter", s=30, x="index", y="Predicted", c="orange", figsize=(6, 10))
     df_test.reset_index().plot(kind="scatter", x="index", y="Observed", secondary_y=False, ax=ax)
     plt.ylabel('Probability', fontsize=24)
     plt.xlabel('Test samples', fontsize=24)
-
     plt.savefig(output_folder + 'BN_model_validation.png', bbox_inches='tight', transparent=True)
     plt.close()
 
-     
-    fig, ax = plt.subplots(figsize=(6, 10))  # Taller format for dashboard
+    fig, ax = plt.subplots(figsize=(6, 10))
     sns.boxplot(x=df_test["Observed"], y=df_test["Predicted"], ax=ax, boxprops={"facecolor": (.4, .6, .8, .5)})
     ax.set_xlabel("Observed", fontsize=24)
     ax.set_ylabel("Predicted", fontsize=24)
@@ -1257,30 +1826,16 @@ for t in targetlist:
     plt.savefig(output_folder + 'BN_model_results.png', bbox_inches='tight', transparent=True)
     plt.close()
 
-    def roundProb(p):
-        if p >= probability_cutoff:
-            return 1
-        else:
-            return 0
-
-    
-    df_test['p_binary'] = df_test['Predicted'].apply(roundProb)
-    
-    acc = accuracy_score(df_test['Observed'].values, df_test['p_binary'].values)
     cm = confusion_matrix(df_test['Observed'].values, df_test['p_binary'].values)
-        
     cm_transposed = cm.T
-    
-    plt.figure(figsize=(6, 10))  # Taller format for dashboard
-    sns.set(font_scale=2)  
+
+    plt.figure(figsize=(6, 10))
+    sns.set(font_scale=2)
     sns.heatmap(cm_transposed, annot=True, cmap="Blues", fmt="d")
     plt.xlabel('Observed', fontsize=24)
     plt.ylabel('Predicted', fontsize=24)
     plt.savefig(output_folder + 'BN_model_confusionMatrix.png', bbox_inches='tight', transparent=True)
     plt.close()
-
-    print(t+" acc = " + str(acc))
-    dict_acc[t] = acc
 
     AllNodes = list(DAG_global['adjmat'].columns)
     
@@ -1325,12 +1880,11 @@ def f_max(v):
     v = [round(i) for i in v]
     print(str(v))
     dict_evidence = {}
-    l = [list(i) for i in DAG_global['model_edges']]
-    model_nodes = [item for sublist in l for item in sublist]    
+    # Use AllNodes (from adjmat.columns) which includes all structural nodes
     for j, valj in enumerate(path[:-1]):
         try:
-            if (valj in model_nodes) and (valj in AllNodes):
-                    dict_evidence[valj] = str(v[j])
+            if valj in AllNodes:
+                dict_evidence[valj] = str(v[j])
         except:
             print('*')
             
@@ -1358,9 +1912,35 @@ res_sub_max = []
 for t in targetlist:
     DAG_global = dict_df_cuts[t+'_dag_global']
 
-    AllNodes = [item for sublist in DAG_global['model_edges']
-                for item in sublist]
-    AllNodes = list(set(AllNodes))
+    # Use adjmat.columns for all nodes (includes nodes even if some edges didn't learn properly)
+    AllNodes = list(DAG_global['adjmat'].columns)
+
+    # Also get nodes from model_edges for comparison
+    edge_nodes = [item for sublist in DAG_global['model_edges'] for item in sublist]
+    edge_nodes = list(set(edge_nodes))
+
+    print(f"\n=== SENSITIVITY ANALYSIS DEBUG for {t} ===")
+    print(f"Nodes in adjmat (structure): {AllNodes}")
+    print(f"Nodes in model_edges (learned): {edge_nodes}")
+    print(f"Shifted nodes in adjmat: {[n for n in AllNodes if '_shift' in n]}")
+    print(f"Shifted nodes in model_edges: {[n for n in edge_nodes if '_shift' in n]}")
+
+    # Check for nodes in structure but not in learned edges
+    missing_in_edges = set(AllNodes) - set(edge_nodes)
+    if missing_in_edges:
+        print(f"!  WARNING: Nodes in structure but NOT in learned edges: {missing_in_edges}")
+
+    # Write to debug file
+    with open(bn_debug_file, 'a') as f:
+        f.write(f"\n{'='*60}\n")
+        f.write(f"SENSITIVITY ANALYSIS for {t}\n")
+        f.write(f"{'='*60}\n")
+        f.write(f"Nodes in adjmat (structure): {AllNodes}\n")
+        f.write(f"Nodes in model_edges (learned): {edge_nodes}\n")
+        f.write(f"Shifted nodes in adjmat: {[n for n in AllNodes if '_shift' in n]}\n")
+        f.write(f"Shifted nodes in model_edges: {[n for n in edge_nodes if '_shift' in n]}\n")
+        if missing_in_edges:
+            f.write(f"WARNING: Nodes in structure but NOT in learned edges: {missing_in_edges}\n")
 
     dictBounds = {}
     dict_NodesUniqueValues = {}
@@ -1374,51 +1954,126 @@ for t in targetlist:
 
 
     trained_model_nodes = list(DAG_global['adjmat'].columns)
-    
+
+    # Debug: Show what nodes are in the trained model
+    shifted_in_model = [n for n in trained_model_nodes if '_shift' in n]
+    print(f"DEBUG: Trained model nodes: {trained_model_nodes}")
+    print(f"DEBUG: Shifted variables in model: {shifted_in_model}")
+    print(f"DEBUG: dictBounds keys: {list(dictBounds.keys())}")
+
+    # Ensure dictBounds and dict_NodesUniqueValues have entries for all trained model nodes (including shifted)
+    for node in trained_model_nodes:
+        if node not in dictBounds:
+            # For shifted variables, get bounds from the original variable
+            if '_shift_t-' in node:
+                original_var = node.split('_shift_t-')[0]
+                if original_var in dictBounds:
+                    dictBounds[node] = dictBounds[original_var]
+                    dict_NodesUniqueValues[node] = dict_NodesUniqueValues.get(original_var, ['0', '1', '2'])
+                    print(f"DEBUG: Added dictBounds[{node}] from {original_var}")
+                else:
+                    # Default bounds if original not found
+                    dictBounds[node] = [(0, 2)]
+                    dict_NodesUniqueValues[node] = ['0', '1', '2']
+                    print(f"DEBUG: Added default dictBounds[{node}]")
+            else:
+                dictBounds[node] = [(0, 2)]
+                dict_NodesUniqueValues[node] = ['0', '1', '2']
+                print(f"DEBUG: Added default dictBounds[{node}]")
+
     # Construct path using trained model node names
     path = [node for node in trained_model_nodes if node != t]
     path = path + [t]
 
+    print(f"DEBUG: Path for scenarios: {path}")
+
     bounds = setBounds(path, dictBounds)
 
     
-    missing_cols = set(path) - set(df_cut.columns)
-    if missing_cols:
-        print(f"ERROR: df_cut missing path columns: {missing_cols}")
+    # Use dict_df_cuts[t] which includes shifted variables, not df_cut
+    data_for_scenarios = dict_df_cuts[t].copy()
 
-        available_path_cols = [col for col in path if col in df_cut.columns]
-        if available_path_cols:
-            listOfRandomVecs = df_cut[available_path_cols].astype(int).values.tolist()
-        else:
-            print(f"ERROR: No path columns available in df_cut")
+    # Create any missing shifted columns from original variables
+    missing_cols = set(path) - set(data_for_scenarios.columns)
+    if missing_cols:
+        print(f"DEBUG: Data missing columns: {missing_cols}")
+        for col in missing_cols:
+            if '_shift_t-' in col:
+                original_var = col.split('_shift_t-')[0]
+                delay = int(col.split('_shift_t-')[1])
+                if original_var in data_for_scenarios.columns:
+                    data_for_scenarios[col] = data_for_scenarios[original_var].shift(delay)
+                    print(f"DEBUG: Created shifted column {col} from {original_var} with delay {delay}")
+
+        # Drop NaN rows created by shifting
+        data_for_scenarios = data_for_scenarios.dropna()
+        print(f"DEBUG: After creating shifted columns, data has {len(data_for_scenarios)} rows")
+
+    # Check again for any still-missing columns
+    still_missing = set(path) - set(data_for_scenarios.columns)
+    if still_missing:
+        print(f"WARNING: Still missing columns after shift creation: {still_missing}")
+        actual_path = [col for col in path if col in data_for_scenarios.columns]
+        if not actual_path:
+            print(f"ERROR: No path columns available in data")
             listOfRandomVecs = []
+        else:
+            if t in actual_path:
+                actual_path.remove(t)
+            actual_path = actual_path + [t]
+            listOfRandomVecs = data_for_scenarios[actual_path].astype(int).values.tolist()
     else:
-        listOfRandomVecs = df_cut[path].astype(int).values.tolist()
+        actual_path = path
+        listOfRandomVecs = data_for_scenarios[path].astype(int).values.tolist()
+
+    print(f"Sensitivity analysis using {len(actual_path)-1} variables: {actual_path[:-1]}")
+
+    # Write to debug file
+    with open(bn_debug_file, 'a') as f:
+        f.write(f"\nSensitivity analysis using {len(actual_path)-1} variables: {actual_path[:-1]}\n")
+        f.write(f"Full actual_path: {actual_path}\n")
+
     # max
-    for j in listOfRandomVecs:
+    # Pre-compute nodes from model_edges for this target's DAG_global
+    l_edges = [list(i) for i in DAG_global['model_edges']]
+    model_edge_nodes = [item for sublist in l_edges for item in sublist]
+    model_edge_nodes = list(set(model_edge_nodes))
+
+    print(f"DEBUG: model_edge_nodes: {model_edge_nodes}")
+    print(f"DEBUG: Shifted in model_edge_nodes: {[n for n in model_edge_nodes if '_shift' in n]}")
+    print(f"DEBUG: actual_path: {actual_path}")
+
+    # Write to debug file
+    with open(bn_debug_file, 'a') as f:
+        f.write(f"model_edge_nodes: {model_edge_nodes}\n")
+        f.write(f"Shifted in model_edge_nodes: {[n for n in model_edge_nodes if '_shift' in n]}\n")
+
+    for row in listOfRandomVecs:
         try:
-            result = f_max(j[:-1])
-            v = [round(i) for i in j[:-1]]
+            result = f_max(row[:-1])
+            v = [round(i) for i in row[:-1]]
             print(str(v))
             dict_evidence = {}
-            l = [list(i) for i in DAG_global['model_edges']]
-            model_nodes = [item for sublist in l for item in sublist]    
-            for j, valj in enumerate(path[:-1]):
+            # Use actual_path for consistent indexing with v
+            # Include ALL nodes from the structural model (AllNodes = adjmat.columns)
+            for idx, valj in enumerate(actual_path[:-1]):
                 try:
-                    if (valj in model_nodes) and (valj in AllNodes):
-                            dict_evidence[valj] = str(v[j])
+                    # Include variable if it's in the structural model (AllNodes)
+                    # The inference will use it if it has learned CPDs
+                    if valj in AllNodes:
+                        dict_evidence[valj] = str(v[idx])
                 except:
                     print()
-                    
+
             for j in targetlist:
                 try:
                     del dict_evidence[j]
                 except:
                     print()
-            print(dict_evidence) 
+            print(dict_evidence)
             res_sub_max.append([path[-1], dict_evidence, result])
-        except:
-            print()
+        except Exception as e:
+            print(f"Scenario analysis error: {e}")
 
 
 max_listofscores = res_sub_max.copy()
@@ -1554,19 +2209,22 @@ for t in targetlist:
 
     for node in cols:
         if node not in t:
+            # Get color using full node name (including shift suffix)
+            node_color = d_max.get(node, '0.5 1.0 1.0')
+
             if '_shift' in node:
-                # Delayed variables with special styling
+                # Delayed variables with special styling (double border)
                 nd = pydot.Node(node,
                                 style='filled',
-                                fontsize="20pt", 
-                                fillcolor=d_max.get(node, '0.5 1.0 1.0'),
+                                fontsize="20pt",
+                                fillcolor=node_color,
                                 penwidth='2',
                                 peripheries='2')
             else:
                 nd = pydot.Node(node,
                                 style='filled',
                                 fontsize="20pt",
-                                fillcolor=d_max.get(node, '0.5 1.0 1.0'))
+                                fillcolor=node_color)
             g_max.add_node(nd)
 
     for c, i in enumerate(edges):
@@ -1632,19 +2290,22 @@ for t in targetlist:
 
     for node in cols:
         if node not in t:
+            # Get color using full node name (including shift suffix)
+            node_color = d_min.get(node, '0.5 1.0 1.0')
+
             if '_shift' in node:
-                # Delayed variables with special styling
+                # Delayed variables with special styling (double border)
                 nd = pydot.Node(node,
                                 style='filled',
-                                fontsize="20pt", 
-                                fillcolor=d_min.get(node, '0.5 1.0 1.0'),
+                                fontsize="20pt",
+                                fillcolor=node_color,
                                 penwidth='2',
                                 peripheries='2')
             else:
                 nd = pydot.Node(node,
                                 style='filled',
                                 fontsize="20pt",
-                                fillcolor=d_min.get(node, '0.5 1.0 1.0'))
+                                fillcolor=node_color)
             g_min.add_node(nd)
 
     for c, i in enumerate(edges):
@@ -1695,153 +2356,203 @@ for t in targetlist:
     g_min.set('ratio', 'compress')  # Compress to fit size
     g_min.write_png(output_folder+"CausalDAG_NET_MEAN_MIN.png")
 
-    
+
+    # Generate individual scenario PNGs with error handling
+    print(f"\nGenerating {len(high_scenarios)} high probability scenario graphs...")
     for i, scenario in enumerate(high_scenarios):
-        l_individual = [(col, scenario[col]) for col in available_cols if col in scenario]
-        values_list = [val for _, val in l_individual]
-        variable_names = [var for var, _ in l_individual]
-        d_individual = generate_distinct_colors(values_list, variable_names, "max")
-        
-        g_individual = pydot.Dot()
-        
-        for node in cols:
-            if node not in t:
-                nd = pydot.Node(node,
-                                style='filled',
-                                fontsize="20pt",
-                                fillcolor=d_individual[node])
-                g_individual.add_node(nd)
+        try:
+            if i % 10 == 0:
+                print(f"  Progress: {i}/{len(high_scenarios)} high scenarios completed")
 
-        for c, edge in enumerate(edges):
-            try:
-                lbl = df_CausalFeatures2[(df_CausalFeatures2['x1'] == edge[0]) & (df_CausalFeatures2['x2'] == edge[1])]['timeToEffect'].values.tolist()[0]
-            except (IndexError, KeyError):
-                lbl = 0  # Default value when edge not found            
-            if (lbl >= 0) and (lbl <= 2):
-                is_direct = 'black'
-            else:
-                is_direct = 'gray'
+            l_individual = [(col, scenario[col]) for col in available_cols if col in scenario]
+            values_list = [val for _, val in l_individual]
+            variable_names = [var for var, _ in l_individual]
+            d_individual = generate_distinct_colors(values_list, variable_names, "max")
 
-            if lbl == 0:
-                lbl = '<'+resample_freq
-            else:
-                if str(lbl) == 'nan':
-                    lbl = ''
+            g_individual = pydot.Dot()
+
+            for node in cols:
+                if node not in t:
+                    # Get color using full node name (including shift suffix)
+                    node_color = d_individual.get(node, '0.5 1.0 1.0')
+
+                    nd = pydot.Node(node,
+                                    style='filled',
+                                    fontsize="20pt",
+                                    fillcolor=node_color)
+                    g_individual.add_node(nd)
+
+            for c, edge in enumerate(edges):
+                try:
+                    lbl = df_CausalFeatures2[(df_CausalFeatures2['x1'] == edge[0]) & (df_CausalFeatures2['x2'] == edge[1])]['timeToEffect'].values.tolist()[0]
+                except (IndexError, KeyError):
+                    lbl = 0  # Default value when edge not found
+                if (lbl >= 0) and (lbl <= 2):
+                    is_direct = 'black'
                 else:
-                    lbl = str(lbl)
+                    is_direct = 'gray'
 
-            g_individual.add_edge(pydot.Edge(edges_[c][0],
-                                  edges_[c][1],
-                                  color=is_direct,
-                                  style="filled",
-                                  #label=lbl,
-                                  fontsize="20pt"))
-        
-        # Much taller than wide for dashboard with high quality
-        g_individual.set('size', '"12,4!"')  # Width x Height - much taller than wide
-        g_individual.set('dpi', '300')  # High quality
-        g_individual.set('rankdir', 'TB')  # Top to bottom layout
-        g_individual.set('ratio', 'compress')  # Compress to fit size
-        g_individual.write_png(output_folder+f"scenario_high_{i:03d}.png")
+                if lbl == 0:
+                    lbl = '<'+resample_freq
+                else:
+                    if str(lbl) == 'nan':
+                        lbl = ''
+                    else:
+                        lbl = str(lbl)
+
+                g_individual.add_edge(pydot.Edge(edges_[c][0],
+                                      edges_[c][1],
+                                      color=is_direct,
+                                      style="filled",
+                                      #label=lbl,
+                                      fontsize="20pt"))
+
+            # Much taller than wide for dashboard with high quality
+            g_individual.set('size', '"12,4!"')  # Width x Height - much taller than wide
+            g_individual.set('dpi', '300')  # High quality
+            g_individual.set('rankdir', 'TB')  # Top to bottom layout
+            g_individual.set('ratio', 'compress')  # Compress to fit size
+            g_individual.write_png(output_folder+f"scenario_high_{i:03d}.png")
+
+        except Exception as e:
+            print(f"  !  Error creating scenario_high_{i:03d}.png: {e}")
+            continue
+
+    print(f"✓ Completed {len(high_scenarios)} high probability scenario graphs")
 
 
+    # Generate low probability scenario PNGs with error handling
+    print(f"\nGenerating {len(low_scenarios)} low probability scenario graphs...")
     for i, scenario in enumerate(low_scenarios):
-        l_individual = [(col, scenario[col]) for col in available_cols if col in scenario]
-        values_list = [val for _, val in l_individual]
-        variable_names = [var for var, _ in l_individual]
-        d_individual = generate_distinct_colors(values_list, variable_names, "min")
-        
-        g_individual = pydot.Dot()
-        
-        for node in cols:
-            if node not in t:
-                nd = pydot.Node(node,
-                                style='filled',
-                                fontsize="20pt",
-                                fillcolor=d_individual[node])
-                g_individual.add_node(nd)
+        try:
+            if i % 20 == 0:
+                print(f"  Progress: {i}/{len(low_scenarios)} low scenarios completed")
 
-        for c, edge in enumerate(edges):
-            try:
-                lbl = df_CausalFeatures2[(df_CausalFeatures2['x1'] == edge[0]) & (df_CausalFeatures2['x2'] == edge[1])]['timeToEffect'].values.tolist()[0]
-            except (IndexError, KeyError):
-                lbl = 0  # Default value when edge not found
-            if (lbl >= 0) and (lbl <= 2):
-                is_direct = 'black'
-            else:
-                is_direct = 'gray'
+            l_individual = [(col, scenario[col]) for col in available_cols if col in scenario]
+            values_list = [val for _, val in l_individual]
+            variable_names = [var for var, _ in l_individual]
+            d_individual = generate_distinct_colors(values_list, variable_names, "min")
 
-            if lbl == 0:
-                lbl = '<'+resample_freq
-            else:
-                if str(lbl) == 'nan':
-                    lbl = ''
+            g_individual = pydot.Dot()
+
+            for node in cols:
+                if node not in t:
+                    # Get color using full node name (including shift suffix)
+                    node_color = d_individual.get(node, '0.5 1.0 1.0')
+
+                    nd = pydot.Node(node,
+                                    style='filled',
+                                    fontsize="20pt",
+                                    fillcolor=node_color)
+                    g_individual.add_node(nd)
+
+            for c, edge in enumerate(edges):
+                try:
+                    lbl = df_CausalFeatures2[(df_CausalFeatures2['x1'] == edge[0]) & (df_CausalFeatures2['x2'] == edge[1])]['timeToEffect'].values.tolist()[0]
+                except (IndexError, KeyError):
+                    lbl = 0  # Default value when edge not found
+                if (lbl >= 0) and (lbl <= 2):
+                    is_direct = 'black'
                 else:
-                    lbl = str(lbl)
+                    is_direct = 'gray'
 
-            g_individual.add_edge(pydot.Edge(edges_[c][0],
-                                  edges_[c][1],
-                                  color=is_direct,
-                                  style="filled",
-                                  #label=lbl,
-                                  fontsize="20pt"))
-        
-        # Much taller than wide for dashboard with high quality
-        g_individual.set('size', '"12,4!"')  # Width x Height - much taller than wide
-        g_individual.set('dpi', '300')  # High quality
-        g_individual.set('rankdir', 'TB')  # Top to bottom layout
-        g_individual.set('ratio', 'compress')  # Compress to fit size
-        g_individual.write_png(output_folder+f"scenario_low_{i:03d}.png")
+                if lbl == 0:
+                    lbl = '<'+resample_freq
+                else:
+                    if str(lbl) == 'nan':
+                        lbl = ''
+                    else:
+                        lbl = str(lbl)
 
-df_de_max = pd.DataFrame(data=allmax, columns=list(max_listofscores[0][1].keys())+['Score']+['y'])
-df_de_max = df_de_max.drop_duplicates()
+                g_individual.add_edge(pydot.Edge(edges_[c][0],
+                                      edges_[c][1],
+                                      color=is_direct,
+                                      style="filled",
+                                      #label=lbl,
+                                      fontsize="20pt"))
+
+            # Much taller than wide for dashboard with high quality
+            g_individual.set('size', '"12,4!"')  # Width x Height - much taller than wide
+            g_individual.set('dpi', '300')  # High quality
+            g_individual.set('rankdir', 'TB')  # Top to bottom layout
+            g_individual.set('ratio', 'compress')  # Compress to fit size
+            g_individual.write_png(output_folder+f"scenario_low_{i:03d}.png")
+
+        except Exception as e:
+            print(f"  !  Error creating scenario_low_{i:03d}.png: {e}")
+            continue
+
+    print(f"✓ Completed {len(low_scenarios)} low probability scenario graphs")
+
+# Create progress marker
+print("\n" + "="*60)
+print("CONTINUING TO HEATMAPS AND FINAL OUTPUTS")
+print("="*60)
+
+try:
+    df_de_max = pd.DataFrame(data=allmax, columns=list(max_listofscores[0][1].keys())+['Score']+['y'])
+    df_de_max = df_de_max.drop_duplicates()
+except Exception as e:
+    print(f"!  Warning: Could not create df_de_max DataFrame: {e}")
+    df_de_max = pd.DataFrame()
 
 
 
 #######Figures#########
-for t in targetlist:
-    DAG_global_learned = dict_df_cuts[t+"_dag_global_learned"]
-    learned_dags_djmat = DAG_global_learned['adjmat']*1
-   
-    plt.figure(figsize=(6, 10))  # Taller format for dashboard
-    g = sns.clustermap(learned_dags_djmat, cbar=False, col_cluster=False, row_cluster=False, linewidths=0.1, cmap='Blues', xticklabels=True, yticklabels=True)
-    g.ax_row_dendrogram.set_visible(False)
-    g.ax_col_dendrogram.set_visible(False)
+print("\nGenerating final heatmap visualizations...")
+try:
+    for t in targetlist:
+        try:
+            DAG_global_learned = dict_df_cuts[t+"_dag_global_learned"]
+            learned_dags_djmat = DAG_global_learned['adjmat']*1
 
-       
-
-    g.ax_heatmap.set_xlabel("Target", fontsize=24, labelpad=20)
-    g.ax_heatmap.set_ylabel("Source", fontsize=24, labelpad=20)
-        
-    
-    if g.cax is not None:
-        g.cax.set_visible(False)    
-    plt.savefig(output_folder + 'learned_fromCCMfeatures_dag.png', bbox_inches='tight', transparent=True)
-    plt.close()
-
-    #######
+            plt.figure(figsize=(6, 10))  # Taller format for dashboard
+            g = sns.clustermap(learned_dags_djmat, cbar=False, col_cluster=False, row_cluster=False, linewidths=0.1, cmap='Blues', xticklabels=True, yticklabels=True)
+            g.ax_row_dendrogram.set_visible(False)
+            g.ax_col_dendrogram.set_visible(False)
 
 
-    dict_df_cuts[t+"_dag_global"]
-    ccm_dags_djmat = DAG_global['adjmat']*1
 
-    plt.figure(figsize=(6, 10))  # Taller format for dashboard
-   
-    g = sns.clustermap(ccm_dags_djmat, cbar=False, col_cluster=False, row_cluster=False,  linewidths=0.1, cmap='Blues', xticklabels=True, yticklabels=True,
-                       ) 
-    g.ax_row_dendrogram.set_visible(False)
-    g.ax_col_dendrogram.set_visible(False)
-    g.ax_heatmap.set_xlabel("Target", fontsize=24, labelpad=20)
-    g.ax_heatmap.set_ylabel("Source", fontsize=24, labelpad=20)
-        
+            g.ax_heatmap.set_xlabel("Target", fontsize=24, labelpad=20)
+            g.ax_heatmap.set_ylabel("Source", fontsize=24, labelpad=20)
 
-    if g.cax is not None:
-        g.cax.set_visible(False)    
-    plt.title("DAG based on the interactions identified by CCM")
-    plt.savefig(output_folder+'ccm_dag.png', bbox_inches='tight', transparent=True)
-    plt.close()
 
-    #######
+            if g.cax is not None:
+                g.cax.set_visible(False)
+            plt.savefig(output_folder + 'learned_fromCCMfeatures_dag.png', bbox_inches='tight', transparent=True)
+            plt.close()
+            print(f"  ✓ Created learned_fromCCMfeatures_dag.png")
+
+            #######
+
+
+            dict_df_cuts[t+"_dag_global"]
+            ccm_dags_djmat = DAG_global['adjmat']*1
+
+            plt.figure(figsize=(6, 10))  # Taller format for dashboard
+
+            g = sns.clustermap(ccm_dags_djmat, cbar=False, col_cluster=False, row_cluster=False,  linewidths=0.1, cmap='Blues', xticklabels=True, yticklabels=True,
+                               )
+            g.ax_row_dendrogram.set_visible(False)
+            g.ax_col_dendrogram.set_visible(False)
+            g.ax_heatmap.set_xlabel("Target", fontsize=24, labelpad=20)
+            g.ax_heatmap.set_ylabel("Source", fontsize=24, labelpad=20)
+
+
+            if g.cax is not None:
+                g.cax.set_visible(False)
+            plt.title("DAG based on the interactions identified by CCM")
+            plt.savefig(output_folder+'ccm_dag.png', bbox_inches='tight', transparent=True)
+            plt.close()
+            print(f"  ✓ Created ccm_dag.png")
+
+        except Exception as e:
+            print(f"  !  Error creating heatmaps for target {t}: {e}")
+            continue
+
+        #######
+except Exception as e:
+    print(f"!  Error in heatmap generation section: {e}")
 
 try:
     df_CausalFeatures2 = pd.read_csv(output_folder+"/Surr_filtered.csv")
@@ -1849,37 +2560,51 @@ except:
     try:
         df_CausalFeatures2 = pd.read_csv(output_folder+"/tmp/CCM_ECCM_curated.csv")
     except:
-        df_CausalFeatures2 = pd.read_csv(output_folder+"/CCM_ECCM_curated.csv")
-    
-ccm_eccm = df_CausalFeatures2.pivot(index='x1', columns='x2', values='Score')
+        try:
+            df_CausalFeatures2 = pd.read_csv(output_folder+"/CCM_ECCM_curated.csv")
+        except Exception as e:
+            print(f"!  Warning: Could not load CausalFeatures2 CSV: {e}")
+            df_CausalFeatures2 = pd.DataFrame()
+
+try:
+    if not df_CausalFeatures2.empty:
+        ccm_eccm = df_CausalFeatures2.pivot(index='x1', columns='x2', values='Score')
+    else:
+        ccm_eccm = pd.DataFrame()
+except Exception as e:
+    print(f"!  Warning: Could not create ccm_eccm pivot: {e}")
+    ccm_eccm = pd.DataFrame()
 
 
 
-plt.rcParams['figure.figsize'] = (6, 10)  # Taller format for dashboard  
-plt.rcParams['xtick.labelsize'] = 24  
-plt.rcParams['ytick.labelsize'] = 24
-plt.rcParams['font.size'] = 24  
-sns.set(style="white") 
+try:
+    if not ccm_eccm.empty:
+        plt.rcParams['figure.figsize'] = (6, 10)  # Taller format for dashboard
+        plt.rcParams['xtick.labelsize'] = 24
+        plt.rcParams['ytick.labelsize'] = 24
+        plt.rcParams['font.size'] = 24
+        sns.set(style="white")
 
 
-g = sns.clustermap(ccm_eccm.fillna(0), cbar=True, col_cluster=False, row_cluster=False,
-                   linewidths=0.1, cmap='Blues', xticklabels=True, yticklabels=True)
+        g = sns.clustermap(ccm_eccm.fillna(0), cbar=True, col_cluster=False, row_cluster=False,
+                           linewidths=0.1, cmap='Blues', xticklabels=True, yticklabels=True)
 
 
 
 
-g.ax_row_dendrogram.set_visible(False)
-g.ax_col_dendrogram.set_visible(False)
+        g.ax_row_dendrogram.set_visible(False)
+        g.ax_col_dendrogram.set_visible(False)
 
 
-g.cax.set_position([.97, .2, .03, .45])  
+        g.cax.set_position([.97, .2, .03, .45])
 
-plt.savefig(output_folder+'ccm_eccm.png', bbox_inches='tight', transparent=True)
-plt.close()
-
-
-df_de_max = pd.DataFrame(data=allmax, columns=list(max_listofscores[0][1].keys())+['Score']+['y'])
-df_de_max = df_de_max.drop_duplicates()
+        plt.savefig(output_folder+'ccm_eccm.png', bbox_inches='tight', transparent=True)
+        plt.close()
+        print(f"  ✓ Created ccm_eccm.png")
+    else:
+        print(f"  !  Skipping ccm_eccm.png (empty data)")
+except Exception as e:
+    print(f"!  Error creating ccm_eccm plot: {e}")
 
 def calculate_diff(lst, mean_output):
     return [abs(x - mean_output) for x in lst]
@@ -1947,14 +2672,36 @@ plt.gca().set_facecolor('white')
 plt.savefig(output_folder + "sensitivity_barplot.png", bbox_inches='tight', dpi=600)
 plt.close()
 
-bn.save(DAG_global, filepath=output_folder+'bnlearn_model', overwrite=True)
+try:
+    bn.save(DAG_global, filepath=output_folder+'bnlearn_model', overwrite=True)
+    print("✓ Saved bnlearn model")
+except Exception as e:
+    print(f"!  Warning: Could not save bnlearn model: {e}")
 
 
 dict_model_essentials = {}
 dict_model_essentials["nodes"] = path[:-1]
 dict_model_essentials["target"] = path[-1]
-dict_model_essentials["accuracy"] = acc
-dict_model_essentials["roc_auc"] = rocauc
+
+# Get accuracy from dict_acc (handles both old and new format)
+target_key = path[-1]
+if target_key in dict_acc:
+    acc_data = dict_acc[target_key]
+    if isinstance(acc_data, dict):
+        # New CV format
+        dict_model_essentials["accuracy"] = acc_data['mean']
+        dict_model_essentials["accuracy_std"] = acc_data.get('std', None)
+        dict_model_essentials["accuracy_ci_lower"] = acc_data.get('ci_lower', None)
+        dict_model_essentials["accuracy_ci_upper"] = acc_data.get('ci_upper', None)
+    else:
+        # Old format (simple float)
+        dict_model_essentials["accuracy"] = acc_data
+else:
+    dict_model_essentials["accuracy"] = None
+    print(f"!  Warning: No accuracy found for target {target_key}")
+
+# ROC AUC might not be set
+dict_model_essentials["roc_auc"] = rocauc if 'rocauc' in locals() else -1
 
 try:
     test_evidence = {node: '1' for node in dict_model_essentials['nodes'][:2]}
@@ -1964,11 +2711,72 @@ try:
 except Exception as e:
     print(f"Inference test FAILED with saved names: {e}")
 
-with open(output_folder+'dict_model_essentials.pickle', 'wb') as handle:
-    pickle.dump(dict_model_essentials, handle, protocol=pickle.HIGHEST_PROTOCOL)
+try:
+    with open(output_folder+'dict_model_essentials.pickle', 'wb') as handle:
+        pickle.dump(dict_model_essentials, handle, protocol=pickle.HIGHEST_PROTOCOL)
+    print(f"✓ Saved dict_model_essentials.pickle")
+except Exception as e:
+    print(f"!  Warning: Could not save dict_model_essentials.pickle: {e}")
 
-with open(output_folder+'bounds.pickle', 'wb') as handle:
-    pickle.dump(dictBounds, handle, protocol=pickle.HIGHEST_PROTOCOL)
+try:
+    with open(output_folder+'bounds.pickle', 'wb') as handle:
+        pickle.dump(dictBounds, handle, protocol=pickle.HIGHEST_PROTOCOL)
+    print(f"✓ Saved bounds.pickle")
+except Exception as e:
+    print(f"!  Warning: Could not save bounds.pickle: {e}")
+
+# Save accuracy results with confidence intervals
+print("\n" + "="*70)
+print("SAVING ACCURACY RESULTS WITH CONFIDENCE INTERVALS")
+print("="*70)
+
+acc_results = []
+print(f"Processing accuracy data for {len(dict_acc)} target(s)...")
+
+for target, acc_data in dict_acc.items():
+    print(f"  - {target}: {type(acc_data).__name__}")
+    if isinstance(acc_data, dict):
+        acc_results.append({
+            'target': target,
+            'method': acc_data['method'],
+            'accuracy_mean': round(acc_data['mean'], 4),
+            'accuracy_std': round(acc_data.get('std', 0), 4) if acc_data.get('std') is not None else None,
+            'ci_lower': round(acc_data.get('ci_lower', 0), 4) if acc_data.get('ci_lower') is not None else None,
+            'ci_upper': round(acc_data.get('ci_upper', 0), 4) if acc_data.get('ci_upper') is not None else None
+        })
+    else:
+        # Legacy format (simple float)
+        acc_results.append({
+            'target': target,
+            'method': 'legacy',
+            'accuracy_mean': round(acc_data, 4),
+            'accuracy_std': None,
+            'ci_lower': None,
+            'ci_upper': None
+        })
+
+if acc_results:
+    try:
+        df_accuracies = pd.DataFrame(acc_results)
+        csv_path = output_folder + 'model_accuracies_with_ci.csv'
+        df_accuracies.to_csv(csv_path, index=False)
+        print(f"\n✓✓✓ SUCCESS: Model accuracies saved to: {csv_path}")
+        print(f"    File size: {len(open(csv_path).read())} bytes")
+
+        # Print summary
+        print("\n=== MODEL ACCURACY SUMMARY ===")
+        for result in acc_results:
+            if result['method'] == 'cross_validation':
+                print(f"  {result['target']}: {result['accuracy_mean']:.3f} ± {result['accuracy_std']:.3f} "
+                      f"(95% CI: [{result['ci_lower']:.3f}, {result['ci_upper']:.3f}])")
+            else:
+                print(f"  {result['target']}: {result['accuracy_mean']:.3f} ({result['method']})")
+    except Exception as e:
+        print(f"X ERROR: Could not save model_accuracies_with_ci.csv: {e}")
+        import traceback
+        traceback.print_exc()
+else:
+    print("!  WARNING: No accuracy results to save (acc_results is empty)")
 
 scenario_data = {}
 
