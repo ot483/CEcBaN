@@ -89,10 +89,11 @@ Input data should be a CSV file with:
 - Subsequent columns: Time series variables
 - No missing values
 - Sufficient data points (recommended: 40+ observations)
+- No '_' in column names
 
 Example:
 ```csv
-Date,Temperature,Chlorophyll_A,Nitrate,Phosphate
+Date,Temperature,ChlorophyllA,Nitrate,Phosphate
 2020-01-01,15.2,2.1,1.5,0.3
 2020-01-08,16.1,2.3,1.4,0.4
 2020-01-15,17.3,2.5,1.3,0.5
