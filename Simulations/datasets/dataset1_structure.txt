@@ -1,0 +1,14 @@
+Dataset: Dataset 1 Baseline
+==================================================
+
+Structural Causal Model:
+-------------------------
+Y1(t) = 0.8 * Y1(t-1) + noise
+Y2(t) = 0.77 * Y2(t-1) + noise
+Y3(t) = 0.65 * Y1(t-1) + -0.79 * Y2(t-1) + noise
+Y4(t) = 0.65 * Y4(t-1) + noise
+Y5(t) = -0.3 * Y2(t-1) + 0.4 * Y3(t-1) + 0.55 * Y4(t-1) + noise
+
+Dataset shape: (1000, 6)
+Variables: ['Y1', 'Y2', 'Y3', 'Y4', 'Y5']
+Time series length: 1000
