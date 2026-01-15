@@ -172,6 +172,7 @@ The analysis generates several output files in the results directory:
 ### Optional LLM Packages
 - openai (≥1.0.0): OpenAI API access
 - google-generativeai (≥0.3.0): Google AI API access
+- Claude: API access
 
 ## Troubleshooting
 
