@@ -66,6 +66,7 @@ pip install openai>=1.0.0 google-generativeai>=0.3.0
 ### Starting the Application
 
 ```bash
+chmod +x run.sh
 ./run.sh
 ```
 
