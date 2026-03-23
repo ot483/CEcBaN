@@ -212,7 +212,7 @@ If you use CEcBaN in your research, please cite:
 
 ```
 Tal, O., Ostrovsky, I., & Gal, G. (2024). A framework for identifying factors controlling cyanobacterium Microcystis flos‐aquae blooms by coupled CCM–ECCM Bayesian networks. Ecology and Evolution, 14(6), e11475.
-Hilau, S., Amitai, Y. and Tal, O. (2026). From Monitoring Data to Management Decisions: Causal Network Analysis of Water Quality Dynamics Using CEcBaN. Water.
+Hilau, S., Amitai, Y. and Tal, O. (2026). From Monitoring Data to Management Decisions: Causal Network Analysis of Water Quality Dynamics Using CEcBaN. Water, 18(6), 764; https://doi.org/10.3390/w18060764 
 ```
 
 
